@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { supabase } from '../../utils/supabase';
+import { supabase } from '../utils/supabase';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 

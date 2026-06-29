@@ -3309,7 +3309,7 @@ export default function IntegratedOperationsPortal() {
                           </span>
                           <h1 className="text-3xl font-black mt-3 tracking-tight">Stores & Task Command Center</h1>
                           <p className="text-sm text-slate-300 font-medium mt-1">
-                            Select a store, open tasks, or continue work from the available shortcuts. The side panel appears after you open a workspace.
+                            Black Rose: Redefining Management Excellence.
                           </p>
                         </div>
                         <div className="flex flex-col sm:items-end gap-3">

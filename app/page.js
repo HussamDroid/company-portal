@@ -14,7 +14,9 @@ export default function IntegratedOperationsPortal() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [authRole, setAuthRole] = useState(''); 
   const [loginUser, setLoginUser] = useState('');
+  const [loginDisplayName, setLoginDisplayName] = useState('');
   const [loginPass, setLoginPass] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [authError, setAuthError] = useState(null);
 
   // --- ACCESS CONTROL RBAC REGISTRY STATE ---
@@ -38,9 +40,20 @@ export default function IntegratedOperationsPortal() {
   });
 
   // --- INTEGRATED NEW STAFF REGISTRATION FORM STATES ---
+  const [regFullName, setRegFullName] = useState('');
   const [regUsername, setRegUsername] = useState('');
   const [regPassword, setRegPassword] = useState('');
+  const [showRegPassword, setShowRegPassword] = useState(false);
   const [regRole, setRegRole] = useState('Operator');
+  const [showPermissions, setShowPermissions] = useState(false);
+  const [editingStaffId, setEditingStaffId] = useState(null);
+  const [staffEditForm, setStaffEditForm] = useState({
+    full_name: '',
+    username: '',
+    password: '',
+    role: 'Operator'
+  });
+  const [showStaffEditPassword, setShowStaffEditPassword] = useState(false);
 
   // --- DATA FLOW STATES ---
   const [products, setProducts] = useState([]);
@@ -69,6 +82,12 @@ export default function IntegratedOperationsPortal() {
     due_at: ''
   });
 
+  // --- SHARED GOOGLE SHEETS LINK STATE ---
+  const [googleSheetLink, setGoogleSheetLink] = useState('');
+  const [googleSheetDraft, setGoogleSheetDraft] = useState('');
+  const [showGoogleSheetModal, setShowGoogleSheetModal] = useState(false);
+  const [googleSheetSaving, setGoogleSheetSaving] = useState(false);
+
   // --- UTILITY UI STATES ---
   const [fullViewImage, setFullViewImage] = useState(null);
   const [dashboardClock, setDashboardClock] = useState(new Date());
@@ -95,6 +114,7 @@ export default function IntegratedOperationsPortal() {
   const [statusFilter, setStatusFilter] = useState('All');
   const [assetFolderSearchQuery, setAssetFolderSearchQuery] = useState('');
   const [assetFolderStoreId, setAssetFolderStoreId] = useState('ALL');
+  const [selectedAssetProductIds, setSelectedAssetProductIds] = useState([]);
   const [editingId, setEditingId] = useState(null);
   
   // --- MODAL WORKSPACE STATES ---
@@ -102,6 +122,8 @@ export default function IntegratedOperationsPortal() {
   const [managerPreview, setManagerPreview] = useState(null);   
   const [isRejecting, setIsRejecting] = useState(false);        
   const [rejectNote, setRejectNote] = useState('');             
+  const [showManagerCompare, setShowManagerCompare] = useState(false);
+  const [fullCompareIndex, setFullCompareIndex] = useState(null);
 
   const [editForm, setEditForm] = useState({
     sku: '',
@@ -132,6 +154,7 @@ export default function IntegratedOperationsPortal() {
   useEffect(() => {
     const savedUser = localStorage.getItem('blackrose_user');
     const savedRole = localStorage.getItem('blackrose_role');
+    const savedDisplayName = localStorage.getItem('blackrose_display_name');
     const savedCustomRoles = localStorage.getItem('blackrose_custom_roles');
     
     if (savedCustomRoles) {
@@ -139,6 +162,7 @@ export default function IntegratedOperationsPortal() {
     }
     if (savedUser && savedRole) {
       setLoginUser(savedUser);
+      setLoginDisplayName(savedDisplayName || savedUser);
       setAuthRole(savedRole);
       setIsLoggedIn(true);
       setActiveTab('home');
@@ -151,9 +175,64 @@ export default function IntegratedOperationsPortal() {
     return () => clearInterval(timer);
   }, []);
 
+  // --- FULL IMAGE VIEWER KEYBOARD NAVIGATION ---
+  useEffect(() => {
+    if (!fullViewImage) return;
+
+    const handleKeyNavigation = (event) => {
+      if (event.key === 'Escape') {
+        setFullViewImage(null);
+        return;
+      }
+
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        moveFullViewImage(1);
+      }
+
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        moveFullViewImage(-1);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyNavigation);
+    return () => window.removeEventListener('keydown', handleKeyNavigation);
+  }, [fullViewImage]);
+
+  // --- FULLSCREEN RAW/EDITED COMPARE KEYBOARD NAVIGATION ---
+  useEffect(() => {
+    if (fullCompareIndex === null || !managerPreview) return;
+
+    const rawCount = getArray(managerPreview.raw_image_url).length;
+    const editedCount = getArray(managerPreview.edited_image_url).length;
+    const pairCount = Math.max(rawCount, editedCount);
+    if (pairCount <= 0) return;
+
+    const handleCompareKeyNavigation = (event) => {
+      if (event.key === 'Escape') {
+        setFullCompareIndex(null);
+        return;
+      }
+
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        setFullCompareIndex(prev => ((Number.isInteger(prev) ? prev : 0) + 1 + pairCount) % pairCount);
+      }
+
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        setFullCompareIndex(prev => ((Number.isInteger(prev) ? prev : 0) - 1 + pairCount) % pairCount);
+      }
+    };
+
+    window.addEventListener('keydown', handleCompareKeyNavigation);
+    return () => window.removeEventListener('keydown', handleCompareKeyNavigation);
+  }, [fullCompareIndex, managerPreview]);
+
   // --- DATABASE DATA SYNCHRONIZERS ---
   async function fetchProducts() {
-    const [prodsRes, historyRes, usersRes, tasksRes, storesRes] = await Promise.all([
+    const [prodsRes, historyRes, usersRes, tasksRes, storesRes, settingsRes] = await Promise.all([
       supabase
         .from('products')
         .select('*')
@@ -164,7 +243,7 @@ export default function IntegratedOperationsPortal() {
         .order('created_at', { ascending: false }),
       supabase
         .from('user_registry')
-        .select('id, username, role, created_at'),
+        .select('*'),
       supabase
         .from('task_board')
         .select('*')
@@ -172,7 +251,12 @@ export default function IntegratedOperationsPortal() {
       supabase
         .from('stores')
         .select('*')
-        .order('name', { ascending: true })
+        .order('name', { ascending: true }),
+      supabase
+        .from('portal_settings')
+        .select('*')
+        .eq('setting_key', 'google_sheet_link')
+        .maybeSingle()
     ]);
 
     if (!prodsRes.error) {
@@ -215,6 +299,14 @@ export default function IntegratedOperationsPortal() {
       setStores([]);
     }
 
+    if (!settingsRes.error) {
+      const savedGoogleSheetLink = settingsRes.data?.setting_value || '';
+      setGoogleSheetLink(savedGoogleSheetLink);
+      setGoogleSheetDraft(savedGoogleSheetLink);
+    } else {
+      console.warn('portal_settings fetch failed. Run the v25 SQL setup to enable Google Sheets link sharing:', settingsRes.error);
+    }
+
     setLoading(false);
   }
 
@@ -255,6 +347,67 @@ export default function IntegratedOperationsPortal() {
     setSearchQuery('');
     setStatusFilter('All');
     setActiveTab(targetTab);
+  };
+
+
+  const normalizeGoogleSheetUrl = (value) => {
+    const clean = String(value || '').trim();
+    if (!clean) return '';
+    if (clean.startsWith('http://') || clean.startsWith('https://')) return clean;
+    return `https://${clean}`;
+  };
+
+  const openGoogleSheetLink = () => {
+    const safeUrl = normalizeGoogleSheetUrl(googleSheetLink);
+
+    if (safeUrl) {
+      window.open(safeUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    if (authRole === 'Admin' || authRole === 'Manager') {
+      setGoogleSheetDraft('');
+      setShowGoogleSheetModal(true);
+      return;
+    }
+
+    alert('Google Sheet link has not been added yet.');
+  };
+
+  const handleSaveGoogleSheetLink = async (e) => {
+    e.preventDefault();
+    if (!(authRole === 'Admin' || authRole === 'Manager')) return;
+
+    const normalizedUrl = normalizeGoogleSheetUrl(googleSheetDraft);
+    if (!normalizedUrl) {
+      alert('Paste a valid Google Sheets link before saving.');
+      return;
+    }
+
+    setGoogleSheetSaving(true);
+    try {
+      const { data, error } = await supabase
+        .from('portal_settings')
+        .upsert({
+          setting_key: 'google_sheet_link',
+          setting_value: normalizedUrl,
+          updated_by: loginDisplayName || loginUser || 'System User',
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'setting_key' })
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      setGoogleSheetLink(data?.setting_value || normalizedUrl);
+      setGoogleSheetDraft(data?.setting_value || normalizedUrl);
+      setShowGoogleSheetModal(false);
+      alert('Google Sheets link saved successfully.');
+    } catch (err) {
+      alert('Google Sheets link save failed: ' + (err.message || 'Unknown error. Run the v25 SQL setup first.'));
+    } finally {
+      setGoogleSheetSaving(false);
+    }
   };
 
   const handleCreateStore = async (e) => {
@@ -601,9 +754,56 @@ export default function IntegratedOperationsPortal() {
 
   const calculateImageWorkflowStatus = (rawImages, editedImages, currentStatus = 'Missing') => {
     if (currentStatus === 'Rejected') return 'Rejected';
-    if (getArray(editedImages).length > 0) return 'Completed';
+    if (currentStatus === 'Ready to Upload') return 'Ready to Upload';
+    if (currentStatus === 'Modified') return 'Modified';
+    if (getArray(editedImages).length > 0) return 'Under Review';
     if (getArray(rawImages).length > 0) return 'Processing';
     return 'Missing';
+  };
+
+  // --- WORKFLOW STATUS DISPLAY HELPERS ---
+  // Database values are kept stable where possible. Some labels are business-facing aliases:
+  // Missing = Ready to work, Processing = In Progress, Completed legacy rows = Under Review.
+  const WORKFLOW_STATUS_FILTERS = [
+    { value: 'All', label: 'All' },
+    { value: 'Missing', label: 'Ready to work' },
+    { value: 'Processing', label: 'In Progress' },
+    { value: 'Under Review', label: 'Under Review' },
+    { value: 'Rejected', label: 'Rejected' },
+    { value: 'Ready to Upload', label: 'Ready to Upload' },
+    { value: 'Modified', label: 'Modified' }
+  ];
+
+  const getStatusLabel = (status) => {
+    const normalized = status || 'Missing';
+    if (normalized === 'Missing') return 'Ready to work';
+    if (normalized === 'Processing') return 'In Progress';
+    if (normalized === 'Completed') return 'Under Review'; // legacy compatibility
+    return normalized;
+  };
+
+  const isUnderReviewStatus = (status) => status === 'Under Review' || status === 'Completed';
+  const isReadyToUploadStatus = (status) => status === 'Ready to Upload';
+
+  const getStatusBadgeClass = (status) => {
+    if (status === 'Ready to Upload') return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+    if (isUnderReviewStatus(status)) return 'bg-blue-100 text-blue-700 border-blue-200';
+    if (status === 'Modified') return 'bg-[rgba(138,21,56,0.10)] text-[#8a1538] border-[rgba(138,21,56,0.28)]';
+    if (status === 'Rejected') return 'bg-red-100 text-red-700 border-red-200';
+    if (status === 'Processing') return 'bg-[rgba(138,21,56,0.10)] text-[#8a1538] border-[rgba(138,21,56,0.28)]';
+    return 'bg-amber-100 text-amber-700 border-amber-200';
+  };
+
+  const moveFullViewImage = (direction) => {
+    setFullViewImage(prev => {
+      const gallery = Array.isArray(prev?.images) ? prev.images : [];
+      if (!prev || gallery.length <= 1) return prev;
+
+      const currentIndex = Number.isInteger(prev.index) ? prev.index : gallery.findIndex(item => item.url === prev.url);
+      const safeIndex = currentIndex >= 0 ? currentIndex : 0;
+      const nextIndex = (safeIndex + direction + gallery.length) % gallery.length;
+      return { ...gallery[nextIndex], images: gallery, index: nextIndex };
+    });
   };
 
   // --- WEBSOCKET REAL-TIME SYNC ---
@@ -655,12 +855,16 @@ export default function IntegratedOperationsPortal() {
 
     const cleanUser = loginUser.trim();
     const cleanPass = loginPass.trim();
+    const cleanUserLower = cleanUser.toLowerCase();
 
-    if (cleanUser === 'admin' && cleanPass === 'admin123') {
+    if (cleanUserLower === 'admin' && cleanPass === 'admin123') {
       setAuthRole('Admin');
+      setLoginUser('admin');
+      setLoginDisplayName('System Administrator');
       setIsLoggedIn(true);
       setActiveTab('home');
-      localStorage.setItem('blackrose_user', 'System Administrator');
+      localStorage.setItem('blackrose_user', 'admin');
+      localStorage.setItem('blackrose_display_name', 'System Administrator');
       localStorage.setItem('blackrose_role', 'Admin');
       return;
     }
@@ -669,17 +873,23 @@ export default function IntegratedOperationsPortal() {
       const { data, error } = await supabase
         .from('user_registry')
         .select('*')
-        .eq('username', cleanUser)
+        .ilike('username', cleanUser)
         .eq('password', cleanPass)
-        .single();
+        .limit(1);
 
-      if (error || !data) {
+      const matchedUser = data?.[0];
+
+      if (error || !matchedUser) {
         setAuthError('Invalid system username or access code.');
       } else {
-        setAuthRole(data.role);
+        const displayName = matchedUser.full_name || matchedUser.name || matchedUser.username;
+        setAuthRole(matchedUser.role);
+        setLoginUser(matchedUser.username);
+        setLoginDisplayName(displayName);
         setIsLoggedIn(true);
-        localStorage.setItem('blackrose_user', data.username);
-        localStorage.setItem('blackrose_role', data.role);
+        localStorage.setItem('blackrose_user', matchedUser.username);
+        localStorage.setItem('blackrose_display_name', displayName);
+        localStorage.setItem('blackrose_role', matchedUser.role);
         setActiveTab('home');
       }
     } catch (err) {
@@ -691,6 +901,7 @@ export default function IntegratedOperationsPortal() {
     setIsLoggedIn(false);
     setAuthRole('');
     setLoginUser('');
+    setLoginDisplayName('');
     setLoginPass('');
     setEditingId(null);
     setSelectedProduct(null);
@@ -700,6 +911,7 @@ export default function IntegratedOperationsPortal() {
     setSelectedStoreId('ALL');
     setActiveTab('home');
     localStorage.removeItem('blackrose_user');
+    localStorage.removeItem('blackrose_display_name');
     localStorage.removeItem('blackrose_role');
   };
 
@@ -752,7 +964,7 @@ export default function IntegratedOperationsPortal() {
             alert(
               "⚠️ Sheet Sync Failed!\n\n" +
               "Reason: You are using an Editor profile, which updates existing catalog data. Because the database was cleared, there are no products to match.\n\n" +
-              "Fix Action: Log out and re-login as an Admin or Manager to do a completely fresh structural sheet import first!"
+              "Fix Action: Log out with an authorized account to do a completely fresh structural sheet import first!"
             );
             setUploading(false);
             return;
@@ -864,7 +1076,7 @@ export default function IntegratedOperationsPortal() {
           edited_payload: editedPayload,
           archive_type: activeStoreNameForUpload ? `Excel Import - ${activeStoreNameForUpload}` : 'Excel Import',
           store_id: activeStoreIdForUpload,
-          archived_by: loginUser || 'System Manager Account',
+          archived_by: loginUser || 'System Account',
           created_at: currentTimestamp
         };
 
@@ -889,7 +1101,7 @@ export default function IntegratedOperationsPortal() {
         setSelectedHistoryScope(file.name);
         
         alert(
-          `🚀 Success! Processed "${file.name}" for ${activeStoreNameForUpload || 'General Catalog'} with [${sanitized.length}] items. New rows were marked as Missing automatically.` +
+          `🚀 Success! Processed "${file.name}" for ${activeStoreNameForUpload || 'General Catalog'} with [${sanitized.length}] items. New rows were marked as Ready to work automatically.` +
           (historySavedToDatabase
             ? ''
             : '\n\n⚠️ Important: Supabase history save was blocked, so the original Excel archive was saved in this browser only. Run the manifest_history SQL policy fix so history is permanent.')
@@ -1088,11 +1300,11 @@ export default function IntegratedOperationsPortal() {
     const missingRows = liveMatrix.slice(1).filter(row => String(row[statusIndex] || '').trim() === 'Missing');
 
     if (missingRows.length === 0) {
-      alert('No Missing products found for this sheet.');
+      alert('No Ready to work products found for this sheet.');
       return;
     }
 
-    handleDownloadSheetExport(`Missing-${filename}`, [headers, ...missingRows]);
+    handleDownloadSheetExport(`Ready-To-Work-${filename}`, [headers, ...missingRows]);
   };
 
   const handleDownloadSheetExport = (filename, dataset) => {
@@ -1305,25 +1517,108 @@ export default function IntegratedOperationsPortal() {
   // --- ACCOUNT USER REGISTRATION METHODS ---
   const handleRegisterStaffAccount = async (e) => {
     e.preventDefault();
-    if (!regUsername.trim() || !regPassword.trim()) return;
+    if (!regFullName.trim() || !regUsername.trim() || !regPassword.trim()) {
+      alert('Full name, username, and password are required.');
+      return;
+    }
 
     try {
+      const normalizedUsername = regUsername.trim().toLowerCase();
+
       const { error } = await supabase
         .from('user_registry')
         .insert([{
-          username: regUsername.trim(),
+          full_name: regFullName.trim(),
+          username: normalizedUsername,
           password: regPassword.trim(),
           role: regRole
         }]);
 
       if (error) throw error;
 
-      alert(`Successfully registered account for "${regUsername.trim()}"`);
+      alert(`Successfully registered account for "${regFullName.trim()}" with username "${normalizedUsername}"`);
+      setRegFullName('');
       setRegUsername('');
       setRegPassword('');
       fetchProducts();
     } catch (err) {
-      alert("Registration failed: " + err.message);
+      alert("Registration failed: " + err.message + "\n\nIf this mentions full_name or portal_settings, run the v25 SQL setup first.");
+    }
+  };
+
+
+  const openStaffEditPanel = (staffUser) => {
+    if (!staffUser?.id) return;
+
+    setEditingStaffId(staffUser.id);
+    setStaffEditForm({
+      full_name: staffUser.full_name || '',
+      username: staffUser.username || '',
+      password: staffUser.password || '',
+      role: staffUser.role || 'Operator'
+    });
+    setShowStaffEditPassword(false);
+  };
+
+  const cancelStaffEditPanel = () => {
+    setEditingStaffId(null);
+    setStaffEditForm({
+      full_name: '',
+      username: '',
+      password: '',
+      role: 'Operator'
+    });
+    setShowStaffEditPassword(false);
+  };
+
+  const handleUpdateStaffAccount = async (e) => {
+    e.preventDefault();
+
+    if (!editingStaffId) return;
+
+    const cleanFullName = staffEditForm.full_name.trim();
+    const cleanUsername = staffEditForm.username.trim().toLowerCase();
+    const cleanPassword = staffEditForm.password.trim();
+    const cleanRole = staffEditForm.role || 'Operator';
+
+    if (!cleanFullName || !cleanUsername || !cleanPassword) {
+      alert('Full name, username, and password are required before saving changes.');
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('user_registry')
+        .update({
+          full_name: cleanFullName,
+          username: cleanUsername,
+          password: cleanPassword,
+          role: cleanRole
+        })
+        .eq('id', editingStaffId)
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      if (data) {
+        setUserRegistry(prev => prev.map(user => user.id === data.id ? data : user));
+      }
+
+      const updatedCurrentSession = cleanUsername === String(loginUser || '').toLowerCase();
+      if (updatedCurrentSession) {
+        setLoginUser(cleanUsername);
+        setLoginDisplayName(cleanFullName);
+        setAuthRole(cleanRole);
+        localStorage.setItem('blackrose_user', cleanUsername);
+        localStorage.setItem('blackrose_display_name', cleanFullName);
+        localStorage.setItem('blackrose_role', cleanRole);
+      }
+
+      cancelStaffEditPanel();
+      alert('Staff account updated successfully. If that staff member is currently logged in on another device, ask them to log out and log back in so the new access level applies.');
+    } catch (err) {
+      alert('Staff update failed: ' + (err.message || 'Unknown error'));
     }
   };
 
@@ -1371,7 +1666,7 @@ export default function IntegratedOperationsPortal() {
       canSuperviseStaff: false
     });
     setShowRoleModal(false);
-    alert(`Custom profile "${formattedRole.roleName}" deployed.`);
+    alert(`Custom permission group "${formattedRole.roleName}" deployed.`);
   };
 
   const handleDeleteCustomRole = (roleNameToDrop) => {
@@ -1412,9 +1707,10 @@ export default function IntegratedOperationsPortal() {
 
     const matchUserProducts = products.filter(p => p.processed_by === operatorName);
 
-    const completedProducts = matchUserProducts.filter(p => p.status === 'Completed');
+    const completedProducts = matchUserProducts.filter(p => isUnderReviewStatus(p.status));
     const modifiedProducts = matchUserProducts.filter(p => p.status === 'Modified');
-    const completionLikeProducts = [...completedProducts, ...modifiedProducts];
+    const readyToUploadProducts = matchUserProducts.filter(p => p.status === 'Ready to Upload');
+    const completionLikeProducts = [...completedProducts, ...modifiedProducts, ...readyToUploadProducts];
     const rejectedProducts = matchUserProducts.filter(p => p.status === 'Rejected');
     const processingProducts = matchUserProducts.filter(p => p.status === 'Processing');
     const missingProducts = matchUserProducts.filter(p => p.status === 'Missing');
@@ -1451,7 +1747,7 @@ export default function IntegratedOperationsPortal() {
       : 0;
 
     const doneProductLedger = matchUserProducts
-      .filter(p => ['Completed', 'Modified', 'Rejected'].includes(p.status))
+      .filter(p => ['Completed', 'Under Review', 'Ready to Upload', 'Modified', 'Rejected'].includes(p.status))
       .sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at))
       .map(p => ({
         id: p.id,
@@ -1475,6 +1771,7 @@ export default function IntegratedOperationsPortal() {
       totalMissing: missingProducts.length,
       totalProcessing: processingProducts.length,
       totalCompleted: completedProducts.length,
+      totalReadyToUpload: readyToUploadProducts.length,
       totalModified: modifiedProducts.length,
       totalRejected: rejectedProducts.length,
       modifiedWeekCount: modifiedThisWeek,
@@ -1488,30 +1785,18 @@ export default function IntegratedOperationsPortal() {
   };
 
   // --- BULK MEDIA ZIP EXTRACTOR ---
-  const handleBulkZipUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const uploadBulkAssetEntries = async (entries, sourceLabel = 'Bulk asset upload') => {
+    const zipScopedStoreId = selectedStoreId !== 'ALL' ? Number(selectedStoreId) : null;
 
-    if (selectedStoreId === 'ALL') {
-      alert('Select a specific store before uploading a ZIP asset folder. This prevents images from being attached to the wrong store.');
-      e.target.value = null;
-      return;
+    if (!zipScopedStoreId) {
+      throw new Error('Select a specific store before uploading image assets. This prevents files from being attached to the wrong store.');
     }
-
-    setUploading(true);
-    const zip = new JSZip();
 
     const normalizeSku = (value) => {
       return String(value || '')
         .trim()
         .toLowerCase()
         .replace(/\s+/g, '');
-    };
-
-    const cleanZipName = (filename) => {
-      return String(filename || '')
-        .replace(/\.zip$/i, '')
-        .trim();
     };
 
     const isImageFile = (filename) => {
@@ -1523,198 +1808,357 @@ export default function IntegratedOperationsPortal() {
         .replace(/[^a-zA-Z0-9._-]/g, '_');
     };
 
-    try {
-      const contents = await zip.loadAsync(file);
-      const zipNameAsSku = cleanZipName(file.name);
+    const cleanZipName = (filename) => {
+      return String(filename || '')
+        .replace(/\.zip$/i, '')
+        .trim();
+    };
 
-      // Fetch all products once. This allows exact SKU match first,
-      // then a safe prefix match for ZIP names with extra barcode/color/size text.
-      const { data: productCatalog, error: catalogError } = await supabase
-        .from('products')
-        .select('id, sku, raw_image_url, edited_image_url, status, processed_by, store_id');
+    const { data: productCatalog, error: catalogError } = await supabase
+      .from('products')
+      .select('*');
 
-      if (catalogError) throw catalogError;
+    if (catalogError) throw catalogError;
 
-      const zipScopedStoreId = selectedStoreId !== 'ALL' ? Number(selectedStoreId) : null;
-      const catalog = (productCatalog || []).filter(p => !zipScopedStoreId || Number(p.store_id || 0) === zipScopedStoreId);
+    const catalog = (productCatalog || []).filter(
+      p => Number(p.store_id || 0) === zipScopedStoreId
+    );
 
-      const findMatchingProduct = (skuCandidates) => {
-        const cleanedCandidates = Array.from(
-          new Set(
-            skuCandidates
-              .filter(Boolean)
-              .map(s => String(s).trim())
-          )
+    // Build a safe lookup list for every product.
+    // It starts with the product SKU, then adds Barcode/EAN/UPC aliases from the original Excel archive.
+    // This avoids forcing photographers to name folders by SKU only. They can name them by SKU or Barcode.
+    const productAliasMap = new Map();
+
+    const addAliasToProduct = (productId, value) => {
+      const cleanValue = String(value || '').trim();
+      if (!productId || !cleanValue) return;
+      if (!productAliasMap.has(productId)) productAliasMap.set(productId, new Set());
+      productAliasMap.get(productId).add(cleanValue);
+    };
+
+    catalog.forEach(product => {
+      addAliasToProduct(product.id, product.sku);
+      addAliasToProduct(product.id, product.barcode);
+      getArray(product.barcodes).forEach(code => addAliasToProduct(product.id, code));
+      getArray(product.barcode_aliases).forEach(code => addAliasToProduct(product.id, code));
+    });
+
+    const SKU_COLUMN_KEYWORDS = ['sku', 'itemcode', 'itemno', 'itemnumber', 'productcode', 'productid', 'model'];
+    const BARCODE_COLUMN_KEYWORDS = ['barcode', 'barcodeno', 'barcodenumber', 'ean', 'upc', 'gtin', 'isbn'];
+
+    const findCatalogProductBySku = (skuValue) => {
+      const cleanSku = normalizeSku(skuValue);
+      if (!cleanSku) return null;
+      return catalog.find(product => normalizeSku(product.sku) === cleanSku) || null;
+    };
+
+    const scopedExcelArchives = manifestHistory.filter(record =>
+      record?.raw_payload && Number(record.store_id || 0) === zipScopedStoreId
+    );
+
+    scopedExcelArchives.forEach(record => {
+      const matrix = archivePayloadToMatrix(record.raw_payload);
+      if (!matrix || matrix.length < 2) return;
+
+      const headers = matrix[0] || [];
+      const skuIndex = findColumnIndexByKeywords(headers, SKU_COLUMN_KEYWORDS);
+      const barcodeIndex = findColumnIndexByKeywords(headers, BARCODE_COLUMN_KEYWORDS);
+
+      if (skuIndex < 0 || barcodeIndex < 0) return;
+
+      matrix.slice(1).forEach(row => {
+        const rowSku = row?.[skuIndex];
+        const rowBarcode = row?.[barcodeIndex];
+        const matchedProduct = findCatalogProductBySku(rowSku);
+        if (matchedProduct) addAliasToProduct(matchedProduct.id, rowBarcode);
+      });
+    });
+
+    const getProductLookupValues = (product) => Array.from(productAliasMap.get(product.id) || new Set([product.sku])).filter(Boolean);
+
+    const findMatchingProduct = (skuCandidates) => {
+      const cleanedCandidates = Array.from(
+        new Set(
+          skuCandidates
+            .filter(Boolean)
+            .map(s => String(s).trim())
+        )
+      );
+
+      for (const candidate of cleanedCandidates) {
+        const candidateNorm = normalizeSku(candidate);
+        if (!candidateNorm) continue;
+
+        const exactMatches = catalog.filter(product =>
+          getProductLookupValues(product).some(alias => normalizeSku(alias) === candidateNorm)
         );
 
-        // 1. Exact SKU match first.
-        for (const candidate of cleanedCandidates) {
-          const exact = catalog.find(p => normalizeSku(p.sku) === normalizeSku(candidate));
-          if (exact) return exact;
-        }
+        // Exact SKU or exact Barcode match is safest. Use it only if it points to one product.
+        if (exactMatches.length === 1) return exactMatches[0];
+      }
 
-        // 2. Safe prefix match.
-        // Example:
-        // DB SKU: BR10-04-4
-        // ZIP name: BR10-04-430025713577-BL-42cm
-        for (const candidate of cleanedCandidates) {
-          const candidateNorm = normalizeSku(candidate);
+      for (const candidate of cleanedCandidates) {
+        const candidateNorm = normalizeSku(candidate);
+        if (!candidateNorm) continue;
 
-          const prefixMatches = catalog.filter(p => {
-            const productSkuNorm = normalizeSku(p.sku);
-            if (!productSkuNorm || !candidateNorm) return false;
+        const prefixMatches = catalog.filter(product =>
+          getProductLookupValues(product).some(alias => {
+            const aliasNorm = normalizeSku(alias);
+            if (!aliasNorm) return false;
 
             return (
-              candidateNorm.startsWith(productSkuNorm) ||
-              productSkuNorm.startsWith(candidateNorm)
+              candidateNorm.startsWith(aliasNorm) ||
+              aliasNorm.startsWith(candidateNorm)
             );
-          });
+          })
+        );
 
-          // Only use prefix match if exactly one product matches.
-          // This prevents attaching images to the wrong SKU.
-          if (prefixMatches.length === 1) return prefixMatches[0];
-        }
+        // Only use prefix match when it is safe and unique.
+        if (prefixMatches.length === 1) return prefixMatches[0];
+      }
 
-        return null;
+      return null;
+    };
+
+    const productUpdates = {};
+    const skippedFiles = [];
+    const unmatchedSkuCandidates = new Set();
+    let uploadedFileCount = 0;
+
+    for (const entry of entries) {
+      const relativePath = entry.relativePath || entry.name || '';
+      const parts = relativePath.split('/').filter(Boolean);
+      const originalFileName = parts[parts.length - 1];
+
+      if (!isImageFile(originalFileName)) {
+        skippedFiles.push(`${relativePath} → skipped, not an image`);
+        continue;
+      }
+
+      const folderIndex = parts.findIndex(part => {
+        const upper = String(part).toUpperCase();
+        return upper.includes('RAW') || upper.includes('EDIT');
+      });
+
+      if (folderIndex === -1) {
+        skippedFiles.push(`${relativePath} → skipped, RAW/EDITED folder not found`);
+        continue;
+      }
+
+      const folderLabel = String(parts[folderIndex]).toUpperCase();
+      const assetType = folderLabel.includes('RAW') ? 'RAW' : 'EDITED';
+
+      const skuCandidates = [];
+
+      if (folderIndex > 0) {
+        skuCandidates.push(parts[folderIndex - 1]); // Best match: SKU/Barcode folder directly before RAW/EDITED.
+        skuCandidates.push(parts[0]);               // Fallback: root folder.
+      }
+
+      const fileNameWithoutExtension = String(originalFileName || '').replace(/\.[^/.]+$/, '');
+      if (fileNameWithoutExtension) {
+        skuCandidates.push(fileNameWithoutExtension); // Fallback: image file named by SKU/Barcode.
+      }
+
+      if (entry.defaultSkuCandidate) {
+        skuCandidates.push(entry.defaultSkuCandidate);
+        skuCandidates.push(cleanZipName(entry.defaultSkuCandidate));
+      }
+
+      const matchedProduct = findMatchingProduct(skuCandidates);
+
+      if (!matchedProduct) {
+        unmatchedSkuCandidates.add(skuCandidates.join(' OR ') || relativePath);
+        skippedFiles.push(`${relativePath} → skipped, no matching SKU/Barcode found`);
+        continue;
+      }
+
+      const fileData = await entry.getBlob();
+      const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}-${safeFileName(originalFileName)}`;
+      const cleanSku = String(matchedProduct.sku || 'UNKNOWN').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const storagePath = `stores/${zipScopedStoreId}/${cleanSku}/${assetType}/${uniqueName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('product-assets')
+        .upload(storagePath, fileData);
+
+      if (uploadError) {
+        skippedFiles.push(`${relativePath} → storage upload failed: ${uploadError.message}`);
+        console.error(`Failed to upload ${storagePath}`, uploadError);
+        continue;
+      }
+
+      const { data: urlData } = supabase
+        .storage
+        .from('product-assets')
+        .getPublicUrl(storagePath);
+
+      if (!productUpdates[matchedProduct.id]) {
+        productUpdates[matchedProduct.id] = {
+          product: matchedProduct,
+          raw: [],
+          edit: []
+        };
+      }
+
+      if (assetType === 'RAW') {
+        productUpdates[matchedProduct.id].raw.push(urlData.publicUrl);
+      } else {
+        productUpdates[matchedProduct.id].edit.push(urlData.publicUrl);
+      }
+
+      uploadedFileCount++;
+    }
+
+    let successCount = 0;
+
+    for (const update of Object.values(productUpdates)) {
+      const currentRaw = getArray(update.product.raw_image_url);
+      const currentEdit = getArray(update.product.edited_image_url);
+
+      const nextRaw = [...currentRaw, ...update.raw];
+      const nextEdit = [...currentEdit, ...update.edit];
+
+      const updatePayload = {
+        raw_image_url: nextRaw,
+        edited_image_url: nextEdit,
+        updated_at: new Date().toISOString()
       };
 
-      const productUpdates = {};
-      const skippedFiles = [];
-      const unmatchedSkuCandidates = new Set();
-      let uploadedFileCount = 0;
+      // Important:
+      // Bulk uploads are usually done by Photographer/Admin.
+      // They must NOT claim the product and must NOT change Ready to work → In Progress.
+      // Only an employee/operator changing the status manually should start tracking.
+      const { error: updateError } = await supabase
+        .from('products')
+        .update(updatePayload)
+        .eq('id', update.product.id);
 
-      for (const [relativePath, zipEntry] of Object.entries(contents.files)) {
-        if (zipEntry.dir) continue;
+      if (updateError) {
+        console.error(`Failed to update product ${update.product.sku}`, updateError);
+        continue;
+      }
 
-        const parts = relativePath.split('/').filter(Boolean);
-        const originalFileName = parts[parts.length - 1];
+      successCount++;
+    }
 
-        if (!isImageFile(originalFileName)) {
-          skippedFiles.push(`${relativePath} → skipped, not an image`);
-          continue;
-        }
+    return {
+      successCount,
+      uploadedFileCount,
+      skippedFiles,
+      unmatchedSkuCandidates: Array.from(unmatchedSkuCandidates),
+      sourceLabel
+    };
+  };
 
-        const folderIndex = parts.findIndex(part => {
-          const upper = String(part).toUpperCase();
-          return upper.includes('RAW') || upper.includes('EDIT');
+  // --- BULK MEDIA ZIP EXTRACTOR ---
+  const handleBulkZipUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    if (selectedStoreId === 'ALL') {
+      alert('Select a specific store before uploading ZIP asset folders. This prevents images from being attached to the wrong store.');
+      e.target.value = null;
+      return;
+    }
+
+    const zipFiles = files.filter(file => /\.zip$/i.test(file.name || ''));
+
+    if (zipFiles.length === 0) {
+      alert('Please select one or more .zip files.');
+      e.target.value = null;
+      return;
+    }
+
+    setUploading(true);
+
+    try {
+      const allEntries = [];
+
+      for (const file of zipFiles) {
+        const zip = new JSZip();
+        const contents = await zip.loadAsync(file);
+        const zipNameAsSku = String(file.name || '').replace(/\.zip$/i, '').trim();
+
+        Object.entries(contents.files).forEach(([relativePath, zipEntry]) => {
+          if (zipEntry.dir) return;
+
+          allEntries.push({
+            relativePath,
+            defaultSkuCandidate: zipNameAsSku,
+            sourceName: file.name,
+            getBlob: () => zipEntry.async('blob')
+          });
         });
-
-        if (folderIndex === -1) {
-          skippedFiles.push(`${relativePath} → skipped, RAW/EDITED folder not found`);
-          continue;
-        }
-
-        const folderLabel = String(parts[folderIndex]).toUpperCase();
-        const assetType = folderLabel.includes('RAW') ? 'RAW' : 'EDIT';
-
-        // Supported ZIP structures:
-        // 1) SKU/RAW/image.jpg
-        // 2) SKU/EDITED/image.jpg
-        // 3) RAW/image.jpg, where ZIP filename is the SKU
-        // 4) EDITED/image.jpg, where ZIP filename is the SKU
-        const skuCandidates = [];
-
-        if (folderIndex > 0) {
-          skuCandidates.push(parts[folderIndex - 1]); // usually SKU folder
-          skuCandidates.push(parts[0]);               // root folder fallback
-        }
-
-        skuCandidates.push(zipNameAsSku);             // ZIP filename fallback
-
-        const matchedProduct = findMatchingProduct(skuCandidates);
-
-        if (!matchedProduct) {
-          unmatchedSkuCandidates.add(skuCandidates.join(' OR '));
-          skippedFiles.push(`${relativePath} → skipped, no matching SKU found`);
-          continue;
-        }
-
-        const fileData = await zipEntry.async('blob');
-        const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}-${safeFileName(originalFileName)}`;
-        const storagePath = `${matchedProduct.sku}/${assetType}/${uniqueName}`;
-
-        const { error: uploadError } = await supabase.storage
-          .from('product-assets')
-          .upload(storagePath, fileData);
-
-        if (uploadError) {
-          skippedFiles.push(`${relativePath} → storage upload failed: ${uploadError.message}`);
-          console.error(`Failed to upload ${storagePath}`, uploadError);
-          continue;
-        }
-
-        const { data: urlData } = supabase
-          .storage
-          .from('product-assets')
-          .getPublicUrl(storagePath);
-
-        if (!productUpdates[matchedProduct.id]) {
-          productUpdates[matchedProduct.id] = {
-            product: matchedProduct,
-            raw: [],
-            edit: []
-          };
-        }
-
-        if (assetType === 'RAW') {
-          productUpdates[matchedProduct.id].raw.push(urlData.publicUrl);
-        } else {
-          productUpdates[matchedProduct.id].edit.push(urlData.publicUrl);
-        }
-
-        uploadedFileCount++;
       }
 
-      let successCount = 0;
+      const result = await uploadBulkAssetEntries(allEntries, `${zipFiles.length} ZIP file(s)`);
 
-      for (const update of Object.values(productUpdates)) {
-        const currentRaw = getArray(update.product.raw_image_url);
-        const currentEdit = getArray(update.product.edited_image_url);
+      let message = `Bulk asset upload completed for ${result.successCount} product item(s).\nUploaded image files: ${result.uploadedFileCount}`;
 
-        const nextRaw = [...currentRaw, ...update.raw];
-        const nextEdit = [...currentEdit, ...update.edit];
-
-        const updatePayload = {
-          raw_image_url: nextRaw,
-          edited_image_url: nextEdit
-        };
-
-        // If product was Missing and now has assets, move it to Processing.
-        // Do not auto-complete because staff may still need to upload more edited images.
-        if (update.product.status === 'Missing' && (nextRaw.length > 0 || nextEdit.length > 0)) {
-          updatePayload.status = 'Processing';
-        }
-
-        const { error: updateError } = await supabase
-          .from('products')
-          .update(updatePayload)
-          .eq('id', update.product.id);
-
-        if (updateError) {
-          console.error(`Failed to update product ${update.product.sku}`, updateError);
-          continue;
-        }
-
-        successCount++;
+      if (zipFiles.length > 1) {
+        message += `\nZIP files processed: ${zipFiles.length}`;
       }
 
-      let message = `ZIP Asset upload completed for ${successCount} production item(s).\nUploaded image files: ${uploadedFileCount}`;
-
-      if (skippedFiles.length > 0) {
-        message += `\nSkipped files: ${skippedFiles.length}`;
-        console.warn('ZIP skipped files:', skippedFiles);
+      if (result.skippedFiles.length > 0) {
+        message += `\nSkipped files: ${result.skippedFiles.length}`;
+        console.warn('Bulk ZIP skipped files:', result.skippedFiles);
       }
 
-      if (unmatchedSkuCandidates.size > 0) {
-        message += `\n\nSome SKU names did not match products. Check browser console for details.`;
-        console.warn('Unmatched SKU candidates:', Array.from(unmatchedSkuCandidates));
+      if (result.unmatchedSkuCandidates.length > 0) {
+        message += `\n\nSome SKU/Barcode names did not match products. Check browser console for details.`;
+        console.warn('Bulk ZIP unmatched SKU candidates:', result.unmatchedSkuCandidates);
       }
 
       alert(message);
-
       await fetchProducts();
     } catch (err) {
       alert('ZIP upload failed: ' + (err.message || 'Unknown error'));
+    } finally {
+      setUploading(false);
+      e.target.value = null;
+    }
+  };
+
+  // --- BULK MEDIA FOLDER EXTRACTOR ---
+  const handleBulkFolderUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    if (selectedStoreId === 'ALL') {
+      alert('Select a specific store before uploading an asset folder. This prevents images from being attached to the wrong store.');
+      e.target.value = null;
+      return;
+    }
+
+    setUploading(true);
+
+    try {
+      const entries = files.map(file => ({
+        relativePath: file.webkitRelativePath || file.name,
+        defaultSkuCandidate: '',
+        sourceName: file.webkitRelativePath || file.name,
+        getBlob: () => Promise.resolve(file)
+      }));
+
+      const result = await uploadBulkAssetEntries(entries, 'folder upload');
+
+      let message = `Folder asset upload completed for ${result.successCount} product item(s).\nUploaded image files: ${result.uploadedFileCount}`;
+
+      if (result.skippedFiles.length > 0) {
+        message += `\nSkipped files: ${result.skippedFiles.length}`;
+        console.warn('Folder upload skipped files:', result.skippedFiles);
+      }
+
+      if (result.unmatchedSkuCandidates.length > 0) {
+        message += `\n\nSome SKU/Barcode names did not match products. Check browser console for details.`;
+        console.warn('Folder upload unmatched SKU candidates:', result.unmatchedSkuCandidates);
+      }
+
+      alert(message);
+      await fetchProducts();
+    } catch (err) {
+      alert('Folder upload failed: ' + (err.message || 'Unknown error'));
     } finally {
       setUploading(false);
       e.target.value = null;
@@ -1774,13 +2218,18 @@ export default function IntegratedOperationsPortal() {
     const isAdminOrManager = authRole === 'Admin' || authRole === 'Manager';
     const isOwnedBySomeoneElse = liveData.processed_by && liveData.processed_by !== loginUser;
 
+    if (liveData.status === 'Ready to Upload' && !isAdminOrManager) {
+      alert('This product is already marked Ready to Upload. Only authorized users can change it now.');
+      return;
+    }
+
     if (!isAdminOrManager && isOwnedBySomeoneElse) {
       alert(`Action Denied: ${liveData.processed_by} has already claimed this item.`);
       return;
     }
 
     if (liveData.status === 'Rejected' && targetStatus !== 'Processing' && !isAdminOrManager) {
-      alert('Rejected items must be moved back to Processing before they can be completed.');
+      alert('Rejected items must be moved back to In Progress before they can be submitted for review.');
       return;
     }
 
@@ -1797,7 +2246,7 @@ export default function IntegratedOperationsPortal() {
 
     if (targetStatus === 'Processing') {
       const isRejectedReopen = liveData.status === 'Rejected';
-      updatePayload.processed_by = liveData.processed_by || loginUser || 'System Operator';
+      updatePayload.processed_by = liveData.processed_by || loginUser || 'System User';
       updatePayload.claimed_at = nowIso;
 
       // Keep the manager rejection note visible while the employee is fixing the product.
@@ -1814,10 +2263,10 @@ export default function IntegratedOperationsPortal() {
       updatePayload.rejection_note = null;
     }
 
-    if (targetStatus === 'Completed') {
+    if (targetStatus === 'Under Review') {
       const isModifiedResubmission = Boolean(liveData.rejection_note);
-      updatePayload.status = isModifiedResubmission ? 'Modified' : 'Completed';
-      updatePayload.processed_by = liveData.processed_by || loginUser || 'System Operator';
+      updatePayload.status = isModifiedResubmission ? 'Modified' : 'Under Review';
+      updatePayload.processed_by = liveData.processed_by || loginUser || 'System User';
       updatePayload.claimed_at = null;
       updatePayload.total_time_spent = previousTrackedSeconds + elapsedSeconds;
 
@@ -1895,10 +2344,63 @@ export default function IntegratedOperationsPortal() {
     }
   };
 
+  const handleReadyToUploadProduct = async (id) => {
+    if (!(authRole === 'Admin' || authRole === 'Manager')) return;
+
+    if (!window.confirm('Mark this product as Ready to Upload? This confirms the approval step.')) return;
+
+    const nowIso = new Date().toISOString();
+
+    const { data: currentTargetData, error: readError } = await supabase
+      .from('products')
+      .select('sku, processed_by, claimed_at, total_time_spent')
+      .eq('id', id)
+      .single();
+
+    if (readError || !currentTargetData) {
+      alert('Could not read product before approval.');
+      return;
+    }
+
+    const previousTrackedSeconds = Number(currentTargetData.total_time_spent) || 0;
+    const startedAt = currentTargetData.claimed_at ? new Date(currentTargetData.claimed_at).getTime() : null;
+    const elapsedSeconds = startedAt
+      ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+      : 0;
+
+    const { data: updatedProduct, error } = await supabase
+      .from('products')
+      .update({
+        status: 'Ready to Upload',
+        rejection_note: null,
+        processed_by: currentTargetData?.processed_by || null,
+        total_time_spent: previousTrackedSeconds + elapsedSeconds,
+        claimed_at: null,
+        updated_at: nowIso
+      })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) {
+      alert('Approval failed: ' + error.message);
+      return;
+    }
+
+    if (updatedProduct) {
+      applyProductPatchLocally(id, updatedProduct);
+    }
+
+    closeManagerPreview();
+    fetchProducts();
+  };
+
   const closeManagerPreview = () => {
     setManagerPreview(null);
     setIsRejecting(false);
     setRejectNote('');
+    setShowManagerCompare(false);
+    setFullCompareIndex(null);
   };
 
   const handleImageUpload = async (id, fieldType, e) => {
@@ -1922,7 +2424,7 @@ export default function IntegratedOperationsPortal() {
       const isClaimedByCurrentEmployee = liveProduct.status === 'Processing' && liveProduct.processed_by === loginUser;
 
       if (!isAdminOrManager && !isClaimedByCurrentEmployee) {
-        alert('Upload locked. First change the product status to Processing so it is claimed under your name.');
+        alert('Upload locked. First change the product status to In Progress so it is claimed under your name.');
         return;
       }
 
@@ -1964,12 +2466,13 @@ export default function IntegratedOperationsPortal() {
 
       const updatePayload = {
         [dbField]: nextArray,
-        // Keep it Processing while the employee is uploading multiple batches.
-        // Employee can manually mark Completed after all RAW/EDITED images are uploaded.
-        status: 'Processing',
-        processed_by: liveProduct.processed_by || loginUser || 'System Operator',
         updated_at: new Date().toISOString()
       };
+
+      // Important:
+      // Image upload should not claim the product and should not change status.
+      // Status/time tracking must start only when an employee manually changes Ready to work → In Progress.
+      // If the product is already In Progress, it naturally stays Processing because we do not overwrite it here.
 
       const { data: updatedProduct, error: dbError } = await supabase
         .from('products')
@@ -1993,17 +2496,88 @@ export default function IntegratedOperationsPortal() {
     }
   };
 
-  const handleRemoveIndividualImage = async (id, fieldType, urlToRemove) => {
-    if(!window.confirm("Permanently drop this media file?")) return;
-    
-    const { data: existingProd } = await supabase.from('products').select('raw_image_url, edited_image_url').eq('id', id).single();
-    const dbField = fieldType === 'raw' ? 'raw_image_url' : 'edited_image_url';
-    
-    const currentArray = getArray(existingProd[dbField]);
-    const filteredArray = currentArray.filter(url => url !== urlToRemove);
+  const extractStoragePathFromPublicUrl = (url) => {
+    if (!url) return null;
 
-    await supabase.from('products').update({ [dbField]: filteredArray }).eq('id', id);
-    fetchProducts();
+    try {
+      const parsed = new URL(url);
+      const marker = '/storage/v1/object/public/product-assets/';
+      const markerIndex = parsed.pathname.indexOf(marker);
+      if (markerIndex === -1) return null;
+      return decodeURIComponent(parsed.pathname.slice(markerIndex + marker.length));
+    } catch (err) {
+      return null;
+    }
+  };
+
+  const handleRemoveIndividualImage = async (id, fieldType, urlToRemove) => {
+    const dbField = fieldType === 'raw' ? 'raw_image_url' : 'edited_image_url';
+    const folderLabel = fieldType === 'raw' ? 'RAW' : 'EDITED';
+
+    try {
+      const { data: existingProd, error: readError } = await supabase
+        .from('products')
+        .select('id, sku, status, processed_by, raw_image_url, edited_image_url')
+        .eq('id', id)
+        .single();
+
+      if (readError || !existingProd) {
+        alert('Could not read the latest product record before removing the image.');
+        return;
+      }
+
+      const isAdminOrManager = authRole === 'Admin' || authRole === 'Manager';
+      const isReadyToUploadLocked = existingProd.status === 'Ready to Upload';
+      const isAssignedEmployee = existingProd.processed_by === loginUser;
+      const canEmployeeRemoveEdited =
+        fieldType === 'edited' &&
+        isAssignedEmployee &&
+        ['Processing', 'Rejected'].includes(existingProd.status);
+
+      if (isReadyToUploadLocked && !isAdminOrManager) {
+        alert('This product is already Ready to Upload. Only authorized users can remove images now.');
+        return;
+      }
+
+      if (!isAdminOrManager && !canEmployeeRemoveEdited) {
+        alert('You can only remove EDITED images from products assigned to you while they are In Progress or Rejected.');
+        return;
+      }
+
+      if (!window.confirm(`Remove this ${folderLabel} image from SKU ${existingProd.sku || 'UNKNOWN'}?`)) return;
+
+      const currentArray = getArray(existingProd[dbField]);
+      const filteredArray = currentArray.filter(url => url !== urlToRemove);
+
+      const { data: updatedProduct, error: updateError } = await supabase
+        .from('products')
+        .update({ [dbField]: filteredArray, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .select('*')
+        .single();
+
+      if (updateError) {
+        alert('Image removal failed: ' + updateError.message);
+        return;
+      }
+
+      const storagePath = extractStoragePathFromPublicUrl(urlToRemove);
+      if (storagePath) {
+        const { error: storageError } = await supabase.storage
+          .from('product-assets')
+          .remove([storagePath]);
+
+        if (storageError) {
+          console.warn('Image was removed from the product record, but storage file deletion failed:', storageError);
+        }
+      }
+
+      if (updatedProduct) {
+        applyProductPatchLocally(id, updatedProduct);
+      }
+    } catch (err) {
+      alert('Image removal failed: ' + (err.message || 'Unknown error'));
+    }
   };
 
   // --- TASK BOARD MANAGEMENT METHODS ---
@@ -2048,7 +2622,7 @@ export default function IntegratedOperationsPortal() {
         priority: taskForm.priority || 'Normal',
         assigned_role: taskForm.assigned_role || 'All',
         due_at: taskForm.due_at || null,
-        updated_by: loginUser || 'System Manager',
+        updated_by: loginUser || 'System User',
         updated_at: nowIso
       };
 
@@ -2065,7 +2639,7 @@ export default function IntegratedOperationsPortal() {
       } else {
         const { data, error } = await supabase
           .from('task_board')
-          .insert([{ ...payload, created_by: loginUser || 'System Manager', status: 'Open' }])
+          .insert([{ ...payload, created_by: loginUser || 'System User', status: 'Open' }])
           .select('*')
           .single();
 
@@ -2158,7 +2732,8 @@ export default function IntegratedOperationsPortal() {
 
   // --- FILTER ROW MATRICES ---
   const filteredProducts = products.filter((prod) => {
-    const matchesStatus = statusFilter === 'All' || prod.status === statusFilter;
+    const matchesStatus = statusFilter === 'All' ||
+      (statusFilter === 'Under Review' ? isUnderReviewStatus(prod.status) : prod.status === statusFilter);
     const matchesStore = isProductInSelectedStore(prod);
     const matchesSheetContext = !selectedHistoryScope || prod.sheet_reference === selectedHistoryScope;
     
@@ -2195,14 +2770,39 @@ export default function IntegratedOperationsPortal() {
   const assetDirectoryRawCount = assetDirectoryProducts.reduce((sum, prod) => sum + getArray(prod.raw_image_url).filter(Boolean).length, 0);
   const assetDirectoryEditedCount = assetDirectoryProducts.reduce((sum, prod) => sum + getArray(prod.edited_image_url).filter(Boolean).length, 0);
 
+  const assetDirectoryProductIds = assetDirectoryProducts.map(prod => prod.id);
+  const selectedAssetDirectoryProducts = products.filter(prod => selectedAssetProductIds.includes(prod.id) && (getArray(prod.raw_image_url).filter(Boolean).length > 0 || getArray(prod.edited_image_url).filter(Boolean).length > 0));
+  const selectedAssetRawCount = selectedAssetDirectoryProducts.reduce((sum, prod) => sum + getArray(prod.raw_image_url).filter(Boolean).length, 0);
+  const selectedAssetEditedCount = selectedAssetDirectoryProducts.reduce((sum, prod) => sum + getArray(prod.edited_image_url).filter(Boolean).length, 0);
+  const allVisibleAssetProductsSelected = assetDirectoryProducts.length > 0 && assetDirectoryProductIds.every(id => selectedAssetProductIds.includes(id));
+
+  const toggleAssetProductSelection = (productId) => {
+    setSelectedAssetProductIds(prev =>
+      prev.includes(productId)
+        ? prev.filter(id => id !== productId)
+        : [...prev, productId]
+    );
+  };
+
+  const handleSelectAllVisibleAssetProducts = () => {
+    setSelectedAssetProductIds(prev => {
+      if (allVisibleAssetProductsSelected) {
+        return prev.filter(id => !assetDirectoryProductIds.includes(id));
+      }
+      return Array.from(new Set([...prev, ...assetDirectoryProductIds]));
+    });
+  };
+
+  const clearAssetProductSelection = () => setSelectedAssetProductIds([]);
+
   const metrics = {
     total: scopedProducts.filter(p => !selectedHistoryScope || p.sheet_reference === selectedHistoryScope).length,
     missing: scopedProducts.filter(p => p.status === 'Missing' && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length,
     processing: scopedProducts.filter(p => p.status === 'Processing' && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length,
-    completed: scopedProducts.filter(p => p.status === 'Completed' && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length,
-    modified: scopedProducts.filter(p => p.status === 'Modified' && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length,
+    underReview: scopedProducts.filter(p => isUnderReviewStatus(p.status) && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length,
     rejected: scopedProducts.filter(p => p.status === 'Rejected' && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length,
-    lowStock: scopedProducts.filter(p => p.stock_quantity < 5 && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length
+    readyToUpload: scopedProducts.filter(p => isReadyToUploadStatus(p.status) && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length,
+    modified: scopedProducts.filter(p => p.status === 'Modified' && (!selectedHistoryScope || p.sheet_reference === selectedHistoryScope)).length
   };
 
   const productUploadedSheets = Array.from(
@@ -2239,9 +2839,10 @@ export default function IntegratedOperationsPortal() {
       total: storeProducts.length,
       missing: storeProducts.filter(p => p.status === 'Missing').length,
       processing: storeProducts.filter(p => p.status === 'Processing').length,
-      completed: storeProducts.filter(p => p.status === 'Completed').length,
-      modified: storeProducts.filter(p => p.status === 'Modified').length,
-      rejected: storeProducts.filter(p => p.status === 'Rejected').length
+      underReview: storeProducts.filter(p => isUnderReviewStatus(p.status)).length,
+      rejected: storeProducts.filter(p => p.status === 'Rejected').length,
+      readyToUpload: storeProducts.filter(p => isReadyToUploadStatus(p.status)).length,
+      modified: storeProducts.filter(p => p.status === 'Modified').length
     };
   });
 
@@ -2249,6 +2850,95 @@ export default function IntegratedOperationsPortal() {
 
   const canViewMyPerformance = isLoggedIn && authRole !== 'Admin' && authRole !== 'Manager';
   const selfPerformanceStats = canViewMyPerformance ? compileUserPerformanceMetrics(loginUser) : null;
+
+  const currentStaffName = loginDisplayName || loginUser || 'Staff Member';
+
+  const getUserDisplayName = (username) => {
+    if (!username) return '';
+    const match = userRegistry.find(user => user.username === username || user.full_name === username);
+    return match?.full_name || match?.username || username;
+  };
+
+  const formatTaskTargetLabel = (value) => {
+    const target = String(value || 'All').trim();
+    if (!target || target.toLowerCase() === 'all') return 'All Staff';
+    if (target === 'Operator') return 'Workflow Staff';
+    if (target === 'Manager') return 'Review Leads';
+    if (target === 'Admin') return 'Full Access';
+    if (target === 'Photographer') return 'Media Staff';
+    if (target === 'Content Editor') return 'Sheet Staff';
+    return getUserDisplayName(target);
+  };
+
+  const permissionFeatures = [
+    { key: 'dashboard', label: 'Dashboard Access' },
+    { key: 'stores_manage', label: 'Create/Delete Stores' },
+    { key: 'excel_upload', label: 'Upload Excel Sheets' },
+    { key: 'ad_hoc', label: 'Add Ad-Hoc Products' },
+    { key: 'bulk_images', label: 'Bulk Image Upload' },
+    { key: 'product_images', label: 'Product Image Upload' },
+    { key: 'claim_status', label: 'Claim / Change Status' },
+    { key: 'submit_review', label: 'Submit Under Review' },
+    { key: 'review_images', label: 'Review Modal' },
+    { key: 'compare_images', label: 'Compare RAW/EDITED' },
+    { key: 'reject', label: 'Reject Products' },
+    { key: 'approve', label: 'Ready To Upload Approval' },
+    { key: 'status_override', label: 'Status Override' },
+    { key: 'remove_edited', label: 'Remove Edited Images' },
+    { key: 'asset_downloads', label: 'SKU Asset Downloads' },
+    { key: 'selected_downloads', label: 'Selected Asset Downloads' },
+    { key: 'sheet_exports', label: 'Original / Live Sheet Exports' },
+    { key: 'tasks_view', label: 'View Tasks' },
+    { key: 'tasks_manage', label: 'Post/Edit Tasks' },
+    { key: 'staff_register', label: 'Register Staff' },
+    { key: 'google_view', label: 'Open Google Sheets' },
+    { key: 'google_manage', label: 'Manage Google Sheet Link' },
+    { key: 'performance', label: 'Performance View' }
+  ];
+
+  const permissionRoles = [
+    { roleName: 'Admin', label: '⚙️ Full Access' },
+    { roleName: 'Manager', label: '🧭 Review Access' },
+    { roleName: 'Operator', label: '👤 Workflow Staff' },
+    { roleName: 'Photographer', label: '📸 Media Staff' },
+    { roleName: 'Content Editor', label: '📝 Sheet Staff' },
+    ...customRoles
+      .filter(role => !['Photographer', 'Content Editor'].includes(role.roleName))
+      .map(role => ({ roleName: role.roleName, label: `🎨 ${role.roleName}`, customRole: role }))
+  ];
+
+  const hasMatrixPermission = (roleName, featureKey) => {
+    if (roleName === 'Admin') return true;
+
+    if (roleName === 'Manager') {
+      return !['my_performance'].includes(featureKey);
+    }
+
+    if (roleName === 'Operator') {
+      return [
+        'dashboard', 'product_images', 'claim_status', 'submit_review', 'remove_edited',
+        'asset_downloads', 'selected_downloads', 'tasks_view', 'google_view', 'performance'
+      ].includes(featureKey);
+    }
+
+    if (roleName === 'Photographer') {
+      return ['dashboard', 'bulk_images', 'asset_downloads', 'selected_downloads', 'tasks_view', 'google_view'].includes(featureKey);
+    }
+
+    if (roleName === 'Content Editor') {
+      return ['dashboard', 'excel_upload', 'sheet_exports', 'tasks_view', 'google_view'].includes(featureKey);
+    }
+
+    const customRole = customRoles.find(role => role.roleName === roleName);
+    if (!customRole) return false;
+
+    if (featureKey === 'dashboard' || featureKey === 'tasks_view' || featureKey === 'google_view') return true;
+    if (['bulk_images', 'product_images', 'asset_downloads', 'selected_downloads'].includes(featureKey)) return Boolean(customRole.permissions.canUploadAssets);
+    if (['excel_upload', 'sheet_exports', 'ad_hoc'].includes(featureKey)) return Boolean(customRole.permissions.canModifyDataSheets);
+    if (['review_images', 'compare_images', 'reject', 'approve'].includes(featureKey)) return Boolean(customRole.permissions.canReviewArrays);
+    if (['stores_manage', 'tasks_manage', 'status_override', 'google_manage'].includes(featureKey)) return Boolean(customRole.permissions.canSuperviseStaff);
+    return false;
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans flex flex-col selection:bg-[rgba(138,21,56,0.85)] selection:text-white">
@@ -2275,7 +2965,7 @@ export default function IntegratedOperationsPortal() {
                   authRole === 'Admin' ? 'bg-[rgba(138,21,56,0.06)] text-[#8a1538] border-[rgba(138,21,56,0.28)] shadow-xs' :
                   authRole === 'Manager' ? 'bg-[rgba(138,21,56,0.06)] text-[#8a1538] border-[rgba(138,21,56,0.28)]' : 'bg-amber-50 text-amber-700 border-amber-200'
                 }`}>
-                   Signature: <span className="underline font-black">{loginUser} [{authRole}]</span>
+                   Signed in: <span className="underline font-black">{currentStaffName}</span>
                 </span>
                 <button onClick={handlePortalLogout} className="px-4 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold text-xs uppercase tracking-wider rounded-xl cursor-pointer transition-all">
                   Logout
@@ -2335,13 +3025,13 @@ export default function IntegratedOperationsPortal() {
                   <button onClick={() => setActiveTab('dashboard')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'dashboard' ? 'bg-[rgba(138,21,56,0.85)] text-white border-[rgba(138,21,56,0.85)]' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Products Dashboard">📊</button>
                   <button onClick={() => setActiveTab('task_board')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'task_board' ? 'bg-indigo-700 text-white border-indigo-700' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Task Board">🧾</button>
                   {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('supervise_staff')) && (
-                    <button onClick={() => setActiveTab('operators')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'operators' ? 'bg-teal-700 text-white border-teal-700' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Active Operators">👥</button>
+                    <button onClick={() => setActiveTab('operators')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'operators' ? 'bg-teal-700 text-white border-teal-700' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Staff Activity">👥</button>
                   )}
                   {canViewMyPerformance && selfPerformanceStats && (
                     <button onClick={() => setActiveTab('my_performance')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'my_performance' ? 'bg-amber-600 text-white border-amber-600' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="My Performance">📈</button>
                   )}
                   {authRole === 'Admin' && (
-                    <button onClick={() => setActiveTab('admin_panel')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'admin_panel' ? 'bg-[rgba(138,21,56,0.85)] text-white border-[rgba(138,21,56,0.85)]' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Admin Panel">👑</button>
+                    <button onClick={() => setActiveTab('admin_panel')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'admin_panel' ? 'bg-[rgba(138,21,56,0.85)] text-white border-[rgba(138,21,56,0.85)]' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Control Panel">👑</button>
                   )}
                   <div className="border-t border-gray-100 pt-2 space-y-2">
                     <button onClick={() => setActiveTab('history_old')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'history_old' ? 'bg-amber-600 text-white border-amber-600' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Original Sheets">📂</button>
@@ -2380,7 +3070,7 @@ export default function IntegratedOperationsPortal() {
                       onClick={() => setActiveTab('operators')} 
                       className={`w-full text-left px-3 py-2 text-xs font-black uppercase tracking-wide rounded-lg transition-all ${activeTab === 'operators' ? 'bg-teal-700 text-white shadow-xs' : 'text-gray-700 hover:bg-gray-100'}`}
                     >
-                      👥 Active Operators
+                      👥 Staff Activity
                     </button>
                   )}
 
@@ -2398,7 +3088,7 @@ export default function IntegratedOperationsPortal() {
                       onClick={() => setActiveTab('admin_panel')} 
                       className={`w-full text-left px-3 py-2 text-xs font-black uppercase tracking-wide rounded-lg transition-all ${activeTab === 'admin_panel' ? 'bg-[rgba(138,21,56,0.85)] text-white shadow-md' : 'text-[#8a1538] hover:bg-[rgba(138,21,56,0.06)]'}`}
                     >
-                      👑 Admin Panel
+                      👑 Control Panel
                     </button>
                   )}
                 </div>
@@ -2546,9 +3236,9 @@ export default function IntegratedOperationsPortal() {
 
             <div className="p-2 border-t text-center">
               {isSidePanelCollapsed ? (
-                <span className="text-[10px] font-mono text-gray-400">v4.2</span>
+                <span className="text-[10px] font-mono text-gray-400">v4.4</span>
               ) : (
-                <span className="text-[10px] font-mono text-gray-400">v4.2 Wide Layout</span>
+                <span className="text-[10px] font-mono text-gray-400">v4.4 Clean Staff Display</span>
               )}
             </div>
           </aside>
@@ -2580,7 +3270,23 @@ export default function IntegratedOperationsPortal() {
                     </div>
                     <div>
                       <label className="block text-xxs font-black text-gray-400 uppercase tracking-widest mb-1">Access Passcode</label>
-                      <input type="password" required value={loginPass} onChange={(e) => setLoginPass(e.target.value)} placeholder="•••••••••••••" className="w-full px-4 py-3 border border-gray-200 rounded-xl bg-gray-50 text-sm text-gray-900 outline-none" />
+                      <div className="relative">
+                        <input
+                          type={showLoginPassword ? "text" : "password"}
+                          required
+                          value={loginPass}
+                          onChange={(e) => setLoginPass(e.target.value)}
+                          placeholder="•••••••••••••"
+                          className="w-full px-4 py-3 pr-20 border border-gray-200 rounded-xl bg-gray-50 text-sm text-gray-900 outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowLoginPassword(prev => !prev)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-black uppercase tracking-wider text-[#8a1538] hover:text-[rgba(138,21,56,0.95)]"
+                        >
+                          {showLoginPassword ? 'Hide' : 'Show'}
+                        </button>
+                      </div>
                     </div>
                     <button type="submit" className="w-full py-3 bg-[rgba(138,21,56,0.85)] hover:bg-[rgba(138,21,56,0.95)] text-white text-xs font-black uppercase tracking-widest rounded-xl transition-all shadow-md cursor-pointer">
                       Authenticate Session
@@ -2599,13 +3305,11 @@ export default function IntegratedOperationsPortal() {
                       <div className="relative z-10 flex flex-col lg:flex-row lg:items-end lg:justify-between gap-6">
                         <div>
                           <span className="text-xxs uppercase tracking-widest font-black text-emerald-300 bg-emerald-900/40 border border-emerald-700/50 px-2.5 py-1 rounded-md">
-                            {authRole === 'Operator' ? 'Employee Home' : authRole === 'Admin' ? 'Admin Home' : 'Manager Home'}
+                            Welcome • {currentStaffName}
                           </span>
                           <h1 className="text-3xl font-black mt-3 tracking-tight">Stores & Task Command Center</h1>
                           <p className="text-sm text-slate-300 font-medium mt-1">
-                            {authRole === 'Operator'
-                              ? 'Select a store or task to start work. The side panel appears after you open a workspace.'
-                              : 'Review store workload, post tasks, and open the workspace you need. The side panel appears after you leave Home.'}
+                            Select a store, open tasks, or continue work from the available shortcuts. The side panel appears after you open a workspace.
                           </p>
                         </div>
                         <div className="flex flex-col sm:items-end gap-3">
@@ -2613,17 +3317,28 @@ export default function IntegratedOperationsPortal() {
                             {dashboardClock.toLocaleDateString([], { weekday: 'short', year: 'numeric', month: 'short', day: '2-digit' })} • {dashboardClock.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </div>
                           <div className="flex flex-wrap gap-2 justify-start sm:justify-end">
+                            <button onClick={openGoogleSheetLink} className="px-4 py-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl text-xs font-black uppercase tracking-wider">
+                              Google Sheets
+                            </button>
+                            {(authRole === 'Admin' || authRole === 'Manager') && (
+                              <button
+                                onClick={() => { setGoogleSheetDraft(googleSheetLink || ''); setShowGoogleSheetModal(true); }}
+                                className="px-4 py-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl text-xs font-black uppercase tracking-wider"
+                              >
+                                {googleSheetLink ? 'Edit Sheet Link' : 'Set Sheet Link'}
+                              </button>
+                            )}
                             <button onClick={() => setActiveTab('task_board')} className="px-4 py-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl text-xs font-black uppercase tracking-wider">
                               Open Tasks
                             </button>
                             {(authRole === 'Admin' || authRole === 'Manager') && (
                               <button onClick={() => setActiveTab('operators')} className="px-4 py-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl text-xs font-black uppercase tracking-wider">
-                                Operators
+                                Staff
                               </button>
                             )}
                             {authRole === 'Admin' && (
                               <button onClick={() => setActiveTab('admin_panel')} className="px-4 py-2 bg-[#8a1538] hover:bg-[#8a1538] border border-[rgba(138,21,56,0.50)] rounded-xl text-xs font-black uppercase tracking-wider">
-                                Admin Panel
+                                Control Panel
                               </button>
                             )}
                           </div>
@@ -2637,7 +3352,7 @@ export default function IntegratedOperationsPortal() {
                           <div>
                             <h2 className="text-lg font-black text-gray-900 uppercase">Stores Overview</h2>
                             <p className="text-xs text-gray-400 font-bold mt-1">
-                              {authRole === 'Operator' ? 'Pick the store you want to work on.' : 'Pick a store to open its dashboard or add a new store.'}
+                              Pick a store to open its dashboard or continue work.
                             </p>
                           </div>
                           <div className="flex flex-wrap gap-2">
@@ -2674,7 +3389,7 @@ export default function IntegratedOperationsPortal() {
                             <div className="text-4xl mb-3">🏪</div>
                             <div className="text-sm font-black text-gray-700 uppercase">No stores added yet</div>
                             <p className="text-xs text-gray-400 font-semibold mt-1">
-                              {(authRole === 'Admin' || authRole === 'Manager') ? 'Add a store above, then upload its Excel sheet from the store dashboard.' : 'Ask your manager to create a store and upload its Excel sheet.'}
+                              {(authRole === 'Admin' || authRole === 'Manager') ? 'Add a store above, then upload its Excel sheet from the store dashboard.' : 'Ask an authorized user to create a store and upload its Excel sheet.'}
                             </p>
                           </div>
                         ) : (
@@ -2712,11 +3427,11 @@ export default function IntegratedOperationsPortal() {
                                   <div className="p-4">
                                     <div className="grid grid-cols-3 gap-2 text-center">
                                       <div className="bg-amber-50 border border-amber-200 rounded-xl p-2">
-                                        <span className="block text-[9px] uppercase text-amber-700 font-black">Missing</span>
+                                        <span className="block text-[9px] uppercase text-amber-700 font-black">Ready</span>
                                         <b className="block text-xl font-black text-amber-800 leading-tight">{store.missing}</b>
                                       </div>
                                       <div className="bg-[rgba(138,21,56,0.06)] border border-[rgba(138,21,56,0.28)] rounded-xl p-2">
-                                        <span className="block text-[9px] uppercase text-[#8a1538] font-black">Process</span>
+                                        <span className="block text-[9px] uppercase text-[#8a1538] font-black">Progress</span>
                                         <b className="block text-xl font-black text-[rgba(138,21,56,0.95)] leading-tight">{store.processing}</b>
                                       </div>
                                       <div className="bg-red-50 border border-red-200 rounded-xl p-2">
@@ -2725,10 +3440,14 @@ export default function IntegratedOperationsPortal() {
                                       </div>
                                     </div>
 
-                                    <div className="grid grid-cols-2 gap-2 mt-2 text-center">
-                                      <div className="bg-green-50 border border-green-200 rounded-xl p-2">
-                                        <span className="block text-[9px] uppercase text-green-700 font-black">Done</span>
-                                        <b className="block text-lg font-black text-green-800 leading-tight">{store.completed}</b>
+                                    <div className="grid grid-cols-3 gap-2 mt-2 text-center">
+                                      <div className="bg-blue-50 border border-blue-200 rounded-xl p-2">
+                                        <span className="block text-[9px] uppercase text-blue-700 font-black">Review</span>
+                                        <b className="block text-lg font-black text-blue-800 leading-tight">{store.underReview}</b>
+                                      </div>
+                                      <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2">
+                                        <span className="block text-[9px] uppercase text-emerald-700 font-black">Upload</span>
+                                        <b className="block text-lg font-black text-emerald-800 leading-tight">{store.readyToUpload}</b>
                                       </div>
                                       <div className="bg-[rgba(138,21,56,0.06)] border border-[rgba(138,21,56,0.28)] rounded-xl p-2">
                                         <span className="block text-[9px] uppercase text-[#8a1538] font-black">Modified</span>
@@ -2806,11 +3525,11 @@ export default function IntegratedOperationsPortal() {
                                   className="px-3 py-2 text-xs border rounded-xl bg-white text-gray-900 font-bold"
                                 >
                                   <option value="All">All Staff</option>
-                                  <option value="Operator">Operators</option>
-                                  <option value="Photographer">Photographers</option>
-                                  <option value="Content Editor">Content Editors</option>
+                                  <option value="Operator">Workflow Staff</option>
+                                  <option value="Photographer">Media Staff</option>
+                                  <option value="Content Editor">Sheet Staff</option>
                                   {userRegistry.map(user => (
-                                    <option key={user.id} value={user.username}>{user.username}</option>
+                                    <option key={user.id} value={user.username}>{user.full_name ? `${user.full_name} (@${user.username})` : user.username}</option>
                                   ))}
                                 </select>
                                 <input
@@ -2838,7 +3557,7 @@ export default function IntegratedOperationsPortal() {
                           <div className="flex items-center justify-between mb-5">
                             <div>
                               <h2 className="text-lg font-black text-gray-900 uppercase">Task Board</h2>
-                              <p className="text-xs text-gray-400 font-bold mt-1">{authRole === 'Operator' ? 'Your active instructions.' : 'Latest active instructions.'}</p>
+                              <p className="text-xs text-gray-400 font-bold mt-1">Latest active instructions.</p>
                             </div>
                             <button onClick={() => setActiveTab('task_board')} className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-xs font-black uppercase">Open Large</button>
                           </div>
@@ -2872,14 +3591,14 @@ export default function IntegratedOperationsPortal() {
                       <div className="relative z-10 flex flex-col md:flex-row md:items-center md:justify-between gap-6">
                         <div>
                           <span className="text-xxs uppercase tracking-widest font-black text-[#8a1538] bg-[#8a1538]/40 border border-[#8a1538]/50 px-2.5 py-1 rounded-md">Control Center Settings</span>
-                          <h1 className="text-3xl font-black mt-3 tracking-tight">System Administration Hub</h1>
+                          <h1 className="text-3xl font-black mt-3 tracking-tight">System Control Hub</h1>
                           <p className="text-sm text-slate-300 font-medium mt-1">Deploy custom permission rules, add new team accounts, and supervise global workflows seamlessly.</p>
                         </div>
                         <button 
                           onClick={() => setShowRoleModal(true)}
                           className="shrink-0 bg-[rgba(138,21,56,0.85)] hover:bg-[rgba(138,21,56,0.85)] text-white font-black text-xs uppercase tracking-wider px-6 py-3.5 rounded-xl shadow-lg transition-all border border-[#8a1538] cursor-pointer"
                         >
-                          ⚡ Create Custom Role Matrix
+                          ⚡ Create Permission Group
                         </button>
                       </div>
                     </div>
@@ -2892,26 +3611,46 @@ export default function IntegratedOperationsPortal() {
                           
                           <form onSubmit={handleRegisterStaffAccount} className="space-y-4">
                             <div>
-                              <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Assign Username</label>
+                              <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Staff Full Name *</label>
+                              <input
+                                type="text" required value={regFullName} onChange={(e) => setRegFullName(e.target.value)} placeholder="e.g. Hussam Ahmed"
+                                className="w-full px-3 py-2 border rounded-xl text-xs bg-gray-50 outline-none text-gray-900 font-medium focus:bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Assign Username *</label>
                               <input 
-                                type="text" required value={regUsername} onChange={(e) => setRegUsername(e.target.value)} placeholder="e.g. hussam_rose" 
+                                type="text" required value={regUsername} onChange={(e) => setRegUsername(e.target.value.toLowerCase())} placeholder="e.g. hussam_rose" 
                                 className="w-full px-3 py-2 border rounded-xl text-xs bg-gray-50 outline-none text-gray-900 font-medium focus:bg-white"
                               />
                             </div>
                             <div>
                               <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Assign Password</label>
-                              <input 
-                                type="password" required value={regPassword} onChange={(e) => setRegPassword(e.target.value)} placeholder="••••••••" 
-                                className="w-full px-3 py-2 border rounded-xl text-xs bg-gray-50 outline-none text-gray-900 font-medium focus:bg-white"
-                              />
+                              <div className="relative">
+                                <input 
+                                  type={showRegPassword ? "text" : "password"}
+                                  required
+                                  value={regPassword}
+                                  onChange={(e) => setRegPassword(e.target.value)}
+                                  placeholder="••••••••" 
+                                  className="w-full px-3 py-2 pr-16 border rounded-xl text-xs bg-gray-50 outline-none text-gray-900 font-medium focus:bg-white"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setShowRegPassword(prev => !prev)}
+                                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] font-black uppercase text-[#8a1538]"
+                                >
+                                  {showRegPassword ? 'Hide' : 'Show'}
+                                </button>
+                              </div>
                             </div>
                             <div>
                               <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Assign Access Profile</label>
                               <select value={regRole} onChange={(e) => setRegRole(e.target.value)} className="w-full px-3 py-2 border rounded-xl text-xs bg-white text-gray-800 outline-none font-bold uppercase">
-                                <option value="Operator">Operator (Floor Operations)</option>
-                                <option value="Manager">Manager (Supervision Scope)</option>
-                                <option value="Photographer">Photographer (Bulk RAW Stream)</option>
-                                <option value="Content Editor">Content Editor (Differential Workbook Match)</option>
+                                <option value="Operator">Workflow Staff</option>
+                                <option value="Manager">Review Access</option>
+                                <option value="Photographer">Media Staff</option>
+                                <option value="Content Editor">Sheet Staff</option>
                                 {customRoles.map((cr, idx) => (
                                   <option key={idx} value={cr.roleName}>{cr.roleName}</option>
                                 ))}
@@ -2929,104 +3668,192 @@ export default function IntegratedOperationsPortal() {
                         <p className="text-xxs font-semibold text-gray-400 mb-4">Revoke running access tokens inside running servers.</p>
                         
                         <div className="overflow-y-auto max-h-[340px] border rounded-xl divide-y">
-                          {userRegistry.map(user => (
-                            <div key={user.id} className="p-4 flex items-center justify-between hover:bg-gray-50/50 transition-colors">
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-[rgba(138,21,56,0.85)] text-white flex items-center justify-center font-bold text-xs">👤</div>
-                                <div>
-                                  <div className="text-xs font-bold text-gray-900">{user.username}</div>
-                                  <div className="text-[10px] text-gray-400 mt-0.5">Created: {new Date(user.created_at).toLocaleDateString()}</div>
-                                </div>
+                          {userRegistry.map(user => {
+                            const isEditingThisStaff = editingStaffId === user.id;
+                            return (
+                              <div key={user.id} className="p-4 hover:bg-gray-50/50 transition-colors">
+                                {!isEditingThisStaff ? (
+                                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                                    <div className="flex items-center gap-3 min-w-0">
+                                      <div className="w-8 h-8 rounded-full bg-[rgba(138,21,56,0.85)] text-white flex items-center justify-center font-bold text-xs shrink-0">👤</div>
+                                      <div className="min-w-0">
+                                        <div className="text-xs font-bold text-gray-900 truncate">{user.full_name || user.username}</div>
+                                        <div className="text-[10px] text-gray-400 mt-0.5 truncate">@{user.username} • Created: {new Date(user.created_at).toLocaleDateString()}</div>
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => openStaffEditPanel(user)}
+                                        className="text-xxs font-black text-[#8a1538] border border-[rgba(138,21,56,0.18)] hover:bg-[rgba(138,21,56,0.06)] px-3 py-1 rounded-lg uppercase tracking-wider cursor-pointer"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button 
+                                        onClick={() => handleRevokeStaffAccess(user.id, user.username)}
+                                        className="text-xxs font-black text-red-600 border border-red-100 hover:bg-red-50 px-3 py-1 rounded-lg uppercase tracking-wider cursor-pointer"
+                                      >
+                                        Revoke Access
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <form onSubmit={handleUpdateStaffAccount} className="space-y-4 bg-[rgba(138,21,56,0.04)] border border-[rgba(138,21,56,0.16)] rounded-2xl p-4">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <div>
+                                        <h4 className="text-xs font-black text-gray-900 uppercase tracking-wider">Edit Staff Account</h4>
+                                        <p className="text-[10px] text-gray-400 font-bold mt-0.5">Update name, username, password, or access profile.</p>
+                                      </div>
+                                      <button type="button" onClick={cancelStaffEditPanel} className="text-gray-400 hover:text-gray-900 text-lg font-black">✕</button>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                      <div>
+                                        <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Full Name *</label>
+                                        <input
+                                          type="text"
+                                          required
+                                          value={staffEditForm.full_name}
+                                          onChange={(e) => setStaffEditForm({ ...staffEditForm, full_name: e.target.value })}
+                                          className="w-full px-3 py-2 border rounded-xl text-xs bg-white outline-none text-gray-900 font-medium"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Username *</label>
+                                        <input
+                                          type="text"
+                                          required
+                                          value={staffEditForm.username}
+                                          onChange={(e) => setStaffEditForm({ ...staffEditForm, username: e.target.value.toLowerCase() })}
+                                          className="w-full px-3 py-2 border rounded-xl text-xs bg-white outline-none text-gray-900 font-medium"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Password *</label>
+                                        <div className="relative">
+                                          <input
+                                            type={showStaffEditPassword ? 'text' : 'password'}
+                                            required
+                                            value={staffEditForm.password}
+                                            onChange={(e) => setStaffEditForm({ ...staffEditForm, password: e.target.value })}
+                                            className="w-full px-3 py-2 pr-16 border rounded-xl text-xs bg-white outline-none text-gray-900 font-medium"
+                                          />
+                                          <button
+                                            type="button"
+                                            onClick={() => setShowStaffEditPassword(prev => !prev)}
+                                            className="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] font-black uppercase text-[#8a1538]"
+                                          >
+                                            {showStaffEditPassword ? 'Hide' : 'Show'}
+                                          </button>
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Access Profile</label>
+                                        <select
+                                          value={staffEditForm.role}
+                                          onChange={(e) => setStaffEditForm({ ...staffEditForm, role: e.target.value })}
+                                          className="w-full px-3 py-2 border rounded-xl text-xs bg-white text-gray-800 outline-none font-bold uppercase"
+                                        >
+                                          <option value="Operator">Workflow Staff</option>
+                                          <option value="Manager">Review Access</option>
+                                          <option value="Photographer">Media Staff</option>
+                                          <option value="Content Editor">Sheet Staff</option>
+                                          {customRoles.map((cr, idx) => (
+                                            <option key={idx} value={cr.roleName}>{cr.roleName}</option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                    </div>
+
+                                    <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                                      <button type="submit" className="flex-1 py-2.5 bg-[rgba(138,21,56,0.85)] hover:bg-[#8a1538] text-white text-xs font-black uppercase tracking-wider rounded-xl cursor-pointer">
+                                        Save Staff Changes
+                                      </button>
+                                      <button type="button" onClick={cancelStaffEditPanel} className="sm:w-32 py-2.5 bg-white border border-gray-200 text-gray-600 text-xs font-black uppercase tracking-wider rounded-xl cursor-pointer hover:bg-gray-50">
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </form>
+                                )}
                               </div>
-                              <div className="flex items-center gap-4">
-                                <span className="text-[9px] font-black tracking-widest uppercase bg-[rgba(138,21,56,0.06)] text-[#8a1538] border border-[rgba(138,21,56,0.18)] px-2.5 py-1 rounded">
-                                  {user.role}
-                                </span>
-                                <button 
-                                  onClick={() => handleRevokeStaffAccess(user.id, user.username)}
-                                  className="text-xxs font-black text-red-600 border border-red-100 hover:bg-red-50 px-3 py-1 rounded-lg uppercase tracking-wider cursor-pointer"
-                                >
-                                  Revoke Access
-                                </button>
-                              </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     </div>
 
                     {/* Permissions Matrix */}
-                    <div className="bg-white border border-gray-200 rounded-2xl p-6 shadow-xs">
-                      <div className="mb-4">
-                        <h2 className="text-sm font-black text-gray-900 uppercase tracking-tight">Access Permissions Matrix Logs</h2>
-                        <p className="text-xs text-gray-400 font-medium">RBAC Security parameters configured inside system components.</p>
-                      </div>
+                    <div className="bg-white border border-gray-200 rounded-2xl shadow-xs overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setShowPermissions(prev => !prev)}
+                        className="w-full p-6 flex items-center justify-between gap-4 text-left hover:bg-gray-50 transition-colors"
+                      >
+                        <div>
+                          <h2 className="text-sm font-black text-gray-900 uppercase tracking-tight">Permissions</h2>
+                          <p className="text-xs text-gray-400 font-medium mt-1">
+                            Expanded access matrix for current portal features. Click to {showPermissions ? 'hide' : 'show'} details.
+                          </p>
+                        </div>
+                        <span className="px-3 py-1.5 rounded-xl bg-[rgba(138,21,56,0.06)] text-[#8a1538] border border-[rgba(138,21,56,0.18)] text-xs font-black uppercase">
+                          {showPermissions ? 'Hide ▲' : 'Show ▼'}
+                        </span>
+                      </button>
 
-                      <div className="overflow-x-auto border rounded-xl">
-                        <table className="w-full text-left border-collapse">
-                          <thead>
-                            <tr className="bg-gray-50 border-b text-xxs uppercase tracking-wider font-black text-gray-400">
-                              <th className="p-4">Assigned Department / Group</th>
-                              <th className="p-4 text-center">Upload Assets Array</th>
-                              <th className="p-4 text-center">Modify Layout Sheets</th>
-                              <th className="p-4 text-center">Review Validation Lists</th>
-                              <th className="p-4 text-center">Supervise Operations</th>
-                              <th className="p-4 text-center">Configuration Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y text-xs font-semibold text-gray-700">
-                            <tr className="bg-slate-50/50">
-                              <td className="p-4 font-bold text-gray-900">⚙️ System Manager (Root Core)</td>
-                              <td className="p-4 text-center text-emerald-600 font-black">✔️ ENABLED</td>
-                              <td className="p-4 text-center text-emerald-600 font-black">✔️ ENABLED</td>
-                              <td className="p-4 text-center text-emerald-600 font-black">✔️ ENABLED</td>
-                              <td className="p-4 text-center text-emerald-600 font-black">✔️ ENABLED</td>
-                              <td className="p-4 text-center tracking-widest uppercase text-xxs font-black text-gray-400">CORE PROTECTED</td>
-                            </tr>
-                            <tr className="bg-slate-50/50">
-                              <td className="p-4 font-bold text-gray-900">👤 Production Operator</td>
-                              <td className="p-4 text-center text-emerald-600 font-black">✔️ ENABLED</td>
-                              <td className="p-4 text-center text-red-500 font-black">❌ DISABLED</td>
-                              <td className="p-4 text-center text-red-500 font-black">❌ DISABLED</td>
-                              <td className="p-4 text-center text-red-500 font-black">❌ DISABLED</td>
-                              <td className="p-4 text-center tracking-widest uppercase text-xxs font-black text-gray-400">CORE PROTECTED</td>
-                            </tr>
-                            {customRoles.map((role, i) => (
-                              <tr key={i} className="hover:bg-gray-50/40 transition-colors">
-                                <td className="p-4 font-black text-[rgba(138,21,56,0.85)]">🎨 {role.roleName}</td>
-                                <td className="p-4 text-center font-bold">
-                                  <span className={`px-2 py-0.5 rounded text-[10px] ${role.permissions.canUploadAssets ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-600'}`}>
-                                    {role.permissions.canUploadAssets ? 'TRUE' : 'FALSE'}
-                                  </span>
-                                </td>
-                                <td className="p-4 text-center font-bold">
-                                  <span className={`px-2 py-0.5 rounded text-[10px] ${role.permissions.canModifyDataSheets ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-600'}`}>
-                                    {role.permissions.canModifyDataSheets ? 'TRUE' : 'FALSE'}
-                                  </span>
-                                </td>
-                                <td className="p-4 text-center font-bold">
-                                  <span className={`px-2 py-0.5 rounded text-[10px] ${role.permissions.canReviewArrays ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-600'}`}>
-                                    {role.permissions.canReviewArrays ? 'TRUE' : 'FALSE'}
-                                  </span>
-                                </td>
-                                <td className="p-4 text-center font-bold">
-                                  <span className={`px-2 py-0.5 rounded text-[10px] ${role.permissions.canSuperviseStaff ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-600'}`}>
-                                    {role.permissions.canSuperviseStaff ? 'TRUE' : 'FALSE'}
-                                  </span>
-                                </td>
-                                <td className="p-4 text-center">
-                                  <button 
-                                    onClick={() => handleDeleteCustomRole(role.roleName)}
-                                    className="px-2.5 py-1 text-red-600 border border-red-100 hover:bg-red-50 rounded uppercase tracking-wider text-xxs font-black transition-colors cursor-pointer"
-                                  >
-                                    Drop Role
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                      {showPermissions && (
+                        <div className="border-t border-gray-100 p-6">
+                          <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl text-[11px] font-bold text-amber-800 leading-relaxed">
+                            This matrix is a clear permission reference. Actual restrictions are still enforced inside the workflow buttons, status rules, and permission checks in the app.
+                          </div>
+                          <div className="overflow-x-auto border rounded-xl">
+                            <table className="w-full text-left border-collapse min-w-[1500px]">
+                              <thead>
+                                <tr className="bg-gray-50 border-b text-xxs uppercase tracking-wider font-black text-gray-400">
+                                  <th className="p-3 sticky left-0 bg-gray-50 z-10 min-w-[190px]">Access Group</th>
+                                  {permissionFeatures.map(feature => (
+                                    <th key={feature.key} className="p-3 text-center min-w-[105px]">{feature.label}</th>
+                                  ))}
+                                  <th className="p-3 text-center min-w-[120px]">Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y text-xs font-semibold text-gray-700">
+                                {permissionRoles.map((role) => {
+                                  const isCustomRole = !['Admin', 'Manager', 'Operator', 'Photographer', 'Content Editor'].includes(role.roleName);
+                                  return (
+                                    <tr key={role.roleName} className="hover:bg-gray-50/40 transition-colors">
+                                      <td className="p-3 font-black text-gray-900 sticky left-0 bg-white z-10 border-r border-gray-100">
+                                        {role.label || role.roleName}
+                                      </td>
+                                      {permissionFeatures.map(feature => {
+                                        const allowed = hasMatrixPermission(role.roleName, feature.key);
+                                        return (
+                                          <td key={`${role.roleName}-${feature.key}`} className="p-3 text-center">
+                                            <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full border text-[11px] font-black ${allowed ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-500 border-red-100'}`}>
+                                              {allowed ? '✓' : '×'}
+                                            </span>
+                                          </td>
+                                        );
+                                      })}
+                                      <td className="p-3 text-center">
+                                        {isCustomRole ? (
+                                          <button
+                                            onClick={() => handleDeleteCustomRole(role.roleName)}
+                                            className="px-2.5 py-1 text-red-600 border border-red-100 hover:bg-red-50 rounded uppercase tracking-wider text-xxs font-black transition-colors cursor-pointer"
+                                          >
+                                            Drop Group
+                                          </button>
+                                        ) : (
+                                          <span className="tracking-widest uppercase text-xxs font-black text-gray-400">Core Protected</span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -3039,7 +3866,7 @@ export default function IntegratedOperationsPortal() {
                         <div>
                           <span className="text-xxs uppercase tracking-widest font-black text-indigo-300 bg-indigo-900/40 border border-indigo-800/50 px-2.5 py-1 rounded-md">Team Dispatch Board</span>
                           <h1 className="text-3xl font-black mt-3 tracking-tight">Task Board</h1>
-                          <p className="text-sm text-slate-300 font-medium mt-1">Managers can post assignments. Employees can view the work queue from the side panel or this large view.</p>
+                          <p className="text-sm text-slate-300 font-medium mt-1">Authorized users can post assignments. Staff can view the work queue from the side panel or this large view.</p>
                         </div>
                         <div className="text-right">
                           <div className="text-3xl font-black">{openTaskCount}</div>
@@ -3092,12 +3919,12 @@ export default function IntegratedOperationsPortal() {
                               className="w-full px-3 py-2 border rounded-xl text-xs bg-white text-gray-900 outline-none font-bold"
                             >
                               <option value="All">All Staff</option>
-                              <option value="Operator">Operators</option>
-                              <option value="Photographer">Photographers</option>
-                              <option value="Content Editor">Content Editors</option>
-                              <option value="Manager">Managers</option>
+                              <option value="Operator">Workflow Staff</option>
+                              <option value="Photographer">Media Staff</option>
+                              <option value="Content Editor">Sheet Staff</option>
+                              <option value="Manager">Review Leads</option>
                               {userRegistry.map(user => (
-                                <option key={user.id} value={user.username}>{user.username}</option>
+                                <option key={user.id} value={user.username}>{user.full_name ? `${user.full_name} (@${user.username})` : user.username}</option>
                               ))}
                             </select>
                           </div>
@@ -3141,7 +3968,7 @@ export default function IntegratedOperationsPortal() {
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                       {visibleTasks.length === 0 ? (
                         <div className="lg:col-span-2 text-center text-xs text-gray-400 font-bold uppercase py-16 bg-white border rounded-2xl">
-                          No tasks available for your role.
+                          No tasks available for you.
                         </div>
                       ) : (
                         visibleTasks.map(task => (
@@ -3150,7 +3977,7 @@ export default function IntegratedOperationsPortal() {
                               <div>
                                 <h3 className="text-base font-black text-gray-900">{task.title}</h3>
                                 <div className="text-[10px] font-bold text-gray-400 mt-1 uppercase tracking-wider">
-                                  Posted by {task.created_by || 'Manager'} • {formatDisplayDateTime(task.created_at)}
+                                  Posted by {getUserDisplayName(task.created_by) || task.created_by || 'System User'} • {formatDisplayDateTime(task.created_at)}
                                 </div>
                               </div>
                               <div className="flex flex-col items-end gap-1">
@@ -3160,7 +3987,7 @@ export default function IntegratedOperationsPortal() {
                             </div>
                             {task.description && <p className="text-sm text-gray-600 font-medium whitespace-pre-wrap leading-relaxed mb-4">{task.description}</p>}
                             <div className="grid grid-cols-2 gap-3 text-[11px] font-bold text-gray-500 mb-4">
-                              <div className="bg-gray-50 border rounded-xl p-3"><span className="block text-gray-400 uppercase text-[9px]">Visible To</span>{task.assigned_role || 'All'}</div>
+                              <div className="bg-gray-50 border rounded-xl p-3"><span className="block text-gray-400 uppercase text-[9px]">Visible To</span>{formatTaskTargetLabel(task.assigned_role)}</div>
                               <div className="bg-gray-50 border rounded-xl p-3"><span className="block text-gray-400 uppercase text-[9px]">Due</span>{formatDisplayDateTime(task.due_at)}</div>
                             </div>
                             <div className="flex flex-wrap gap-2">
@@ -3265,7 +4092,7 @@ export default function IntegratedOperationsPortal() {
                                   onClick={() => handleDownloadMissingByName(sheetName)}
                                   className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white border border-amber-600 rounded-lg text-[10px] font-black uppercase tracking-wider transition-colors cursor-pointer shadow-sm"
                                 >
-                                  Download Missing
+                                  Download Ready to Work
                                 </button>
                                 <button 
                                   onClick={() => handleDashboardPurgeSheetByName(sheetName)}
@@ -3282,32 +4109,32 @@ export default function IntegratedOperationsPortal() {
 
                     <div className="grid grid-cols-2 lg:grid-cols-7 gap-4 mb-8">
                       <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
-                        <div className="text-xs font-bold text-gray-400 uppercase tracking-wider">Catalog Scope</div>
+                        <div className="text-xs font-bold text-gray-400 uppercase tracking-wider">Total Products</div>
                         <div className="text-2xl font-black text-gray-900 mt-1">{metrics.total}</div>
                       </div>
                       <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-amber-500">
-                        <div className="text-xs font-bold text-amber-600 uppercase tracking-wider">Missing</div>
+                        <div className="text-xs font-bold text-amber-600 uppercase tracking-wider">Ready to work</div>
                         <div className="text-2xl font-black text-amber-700 mt-1">{metrics.missing}</div>
                       </div>
                       <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-blue-500">
                         <div className="text-xs font-bold text-[rgba(138,21,56,0.85)] uppercase tracking-wider">In Progress</div>
                         <div className="text-2xl font-black text-[#8a1538] mt-1">{metrics.processing}</div>
                       </div>
-                      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-green-500">
-                        <div className="text-xs font-bold text-green-600 uppercase tracking-wider">Completed</div>
-                        <div className="text-2xl font-black text-green-700 mt-1">{metrics.completed}</div>
-                      </div>
-                      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-purple-500">
-                        <div className="text-xs font-bold text-[rgba(138,21,56,0.85)] uppercase tracking-wider">Modified</div>
-                        <div className="text-2xl font-black text-[#8a1538] mt-1">{metrics.modified}</div>
+                      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-sky-500">
+                        <div className="text-xs font-bold text-blue-600 uppercase tracking-wider">Under Review</div>
+                        <div className="text-2xl font-black text-blue-700 mt-1">{metrics.underReview}</div>
                       </div>
                       <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-red-500">
                         <div className="text-xs font-bold text-red-600 uppercase tracking-wider">Rejected</div>
                         <div className="text-2xl font-black text-red-700 mt-1">{metrics.rejected}</div>
                       </div>
-                      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-orange-500">
-                        <div className="text-xs font-bold text-orange-600 uppercase tracking-wider">Low Stock</div>
-                        <div className="text-2xl font-black text-orange-700 mt-1">{metrics.lowStock}</div>
+                      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-emerald-500">
+                        <div className="text-xs font-bold text-emerald-600 uppercase tracking-wider">Ready to Upload</div>
+                        <div className="text-2xl font-black text-emerald-700 mt-1">{metrics.readyToUpload}</div>
+                      </div>
+                      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs border-l-4 border-l-purple-500">
+                        <div className="text-xs font-bold text-[rgba(138,21,56,0.85)] uppercase tracking-wider">Modified</div>
+                        <div className="text-2xl font-black text-[#8a1538] mt-1">{metrics.modified}</div>
                       </div>
                     </div>
 
@@ -3340,17 +4167,42 @@ export default function IntegratedOperationsPortal() {
                             <h3 className="text-sm font-black text-[rgba(138,21,56,0.85)] uppercase tracking-wide flex items-center gap-2">
                               <span>🗂️</span> Bulk Image Asset Upload
                             </h3>
-                            <p className="text-xs text-[#8a1538] font-medium mt-1">Supported ZIP formats: <strong>[SKU]/RAW/img.jpg</strong>, <strong>[SKU]/EDITED/img.jpg</strong>, or a ZIP named <strong>[SKU].zip</strong> containing <strong>RAW/img.jpg</strong>.</p>
+                            <p className="text-xs text-[#8a1538] font-medium mt-1">Supported ZIP/folder formats: <strong>[SKU or Barcode]/RAW/img.jpg</strong>, <strong>[SKU or Barcode]/EDITED/img.jpg</strong>, or ZIP files named by SKU/Barcode containing <strong>RAW/img.jpg</strong>.</p>
                             <p className={`text-[11px] font-bold mt-2 ${isStoreScoped ? 'text-emerald-700' : 'text-red-600'}`}>
                               Upload target: {isStoreScoped ? getStoreNameById(selectedStoreId) : 'Select one store first'}
                             </p>
                           </div>
                           <div className="mt-4 flex flex-col gap-2">
-                            <label className={`w-full py-3 rounded-xl text-xs font-bold uppercase tracking-wider shadow-xs transition-colors block text-center ${isStoreScoped && !uploading ? 'bg-[rgba(138,21,56,0.85)] hover:bg-[#8a1538] text-white cursor-pointer' : 'bg-gray-200 text-gray-500 cursor-not-allowed'}`}>
-                              {uploading ? "Extracting ZIP tree..." : isStoreScoped ? "Upload Assets ZIP" : "Select Store To Upload ZIP"}
-                              <input type="file" accept=".zip" onChange={handleBulkZipUpload} disabled={uploading || !isStoreScoped} className="hidden" />
-                            </label>
-                            
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              <label className={`w-full py-3 rounded-xl text-xs font-bold uppercase tracking-wider shadow-xs transition-colors block text-center ${isStoreScoped && !uploading ? 'bg-[rgba(138,21,56,0.85)] hover:bg-[#8a1538] text-white cursor-pointer' : 'bg-gray-200 text-gray-500 cursor-not-allowed'}`}>
+                                {uploading ? "Extracting assets..." : isStoreScoped ? "Upload ZIP File(s)" : "Select Store First"}
+                                <input
+                                  type="file"
+                                  accept=".zip"
+                                  multiple
+                                  onChange={handleBulkZipUpload}
+                                  disabled={uploading || !isStoreScoped}
+                                  className="hidden"
+                                />
+                              </label>
+
+                              <label className={`w-full py-3 rounded-xl text-xs font-bold uppercase tracking-wider shadow-xs transition-colors block text-center ${isStoreScoped && !uploading ? 'bg-white hover:bg-gray-50 text-[rgba(138,21,56,0.95)] border border-[rgba(138,21,56,0.28)] cursor-pointer' : 'bg-gray-200 text-gray-500 cursor-not-allowed'}`}>
+                                {uploading ? "Reading folders..." : isStoreScoped ? "Upload Folder Tree" : "Select Store First"}
+                                <input
+                                  type="file"
+                                  multiple
+                                  webkitdirectory=""
+                                  directory=""
+                                  onChange={handleBulkFolderUpload}
+                                  disabled={uploading || !isStoreScoped}
+                                  className="hidden"
+                                />
+                              </label>
+                            </div>
+                            <p className="text-[10px] text-gray-500 font-bold leading-relaxed">
+                              For full inventory upload, select one parent folder that contains many <strong>SKU/RAW</strong> and <strong>SKU/EDITED</strong> folders, or select multiple ZIP files at once.
+                            </p>
+
                             {/* RESTORED BULK ASSETS EXPORT BUTTON */}
                             {(authRole === 'Admin' || authRole === 'Manager') && (
                               <button 
@@ -3371,14 +4223,14 @@ export default function IntegratedOperationsPortal() {
                         className="w-full md:max-w-md px-4 py-2 border border-gray-300 rounded-lg text-sm bg-gray-50 outline-none text-gray-900"
                       />
                       <div className="flex flex-wrap items-center gap-2">
-                        {['All', 'Missing', 'Processing', 'Completed', 'Modified', 'Rejected'].map((status) => (
+                        {WORKFLOW_STATUS_FILTERS.map((statusOption) => (
                           <button
-                            key={status} onClick={() => setStatusFilter(status)}
+                            key={statusOption.value} onClick={() => setStatusFilter(statusOption.value)}
                             className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase transition-all border ${
-                              statusFilter === status ? 'bg-[rgba(138,21,56,0.85)] text-white border-[rgba(138,21,56,0.85)]' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'
+                              statusFilter === statusOption.value ? 'bg-[rgba(138,21,56,0.85)] text-white border-[rgba(138,21,56,0.85)]' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'
                             }`}
                           >
-                            {status}
+                            {statusOption.label}
                           </button>
                         ))}
                       </div>
@@ -3389,7 +4241,7 @@ export default function IntegratedOperationsPortal() {
                         {filteredProducts.map((prod) => {
                           const isProcessing = prod.status === 'Processing';
                           const isRejected = prod.status === 'Rejected';
-                          const statusColors = prod.status === 'Completed' ? 'bg-green-100 text-green-700 border-green-200' : prod.status === 'Modified' ? 'bg-[rgba(138,21,56,0.10)] text-[#8a1538] border-[rgba(138,21,56,0.28)]' : prod.status === 'Rejected' ? 'bg-red-100 text-red-700 border-red-200' : prod.status === 'Processing' ? 'bg-[rgba(138,21,56,0.10)] text-[#8a1538] border-[rgba(138,21,56,0.28)]' : 'bg-amber-100 text-amber-700 border-amber-200';
+                          const statusColors = getStatusBadgeClass(prod.status);
                           return (
                             <div 
                               key={prod.id} onClick={() => handleCardInteraction(prod)}
@@ -3397,7 +4249,7 @@ export default function IntegratedOperationsPortal() {
                             >
                               <div className="flex-grow">
                                 <div className="flex items-center justify-between mb-4">
-                                  <span className={`text-[10px] font-bold uppercase px-2.5 py-1 rounded-md border ${statusColors}`}>{prod.status || 'Missing'}</span>
+                                  <span className={`text-[10px] font-bold uppercase px-2.5 py-1 rounded-md border ${statusColors}`}>{getStatusLabel(prod.status)}</span>
                                </div>
                                 <h3 className="font-bold text-base text-gray-900 line-clamp-2 mb-4 group-hover:text-[rgba(138,21,56,0.85)]">{prod.product_name}</h3>
                                 <div className="grid grid-cols-2 gap-4">
@@ -3431,7 +4283,7 @@ export default function IntegratedOperationsPortal() {
                                 {prod.status === 'Rejected' && (
                                   <div className="mt-4 p-3 rounded-lg bg-red-50 border border-red-200">
                                     <div className="text-[10px] font-black uppercase tracking-wider text-red-600 mb-1">
-                                      Manager Note
+                                      Review Note
                                     </div>
                                     <p className="text-xs font-semibold text-red-800 line-clamp-3 whitespace-pre-wrap">
                                       {prod.rejection_note || 'No rejection note was provided.'}
@@ -3477,7 +4329,7 @@ export default function IntegratedOperationsPortal() {
                                       <button onClick={() => setManagerPreview(prod)} className="text-[10px] font-bold px-4 py-2 bg-slate-100 rounded-lg border border-gray-200 cursor-pointer">Review</button>
                                     </td>
                                     <td className="p-4">
-                                      <span className="px-3 py-1 rounded-full border text-xs font-bold">{prod.status}</span>
+                                      <span className={`px-3 py-1 rounded-full border text-xs font-bold ${getStatusBadgeClass(prod.status)}`}>{getStatusLabel(prod.status)}</span>
                                     </td>
                                     <td className="p-4 text-center">
                                       {isEditing ? (
@@ -3536,22 +4388,26 @@ export default function IntegratedOperationsPortal() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+                    <div className="grid grid-cols-2 md:grid-cols-7 gap-4">
                       <div className="border p-4 rounded-xl bg-white shadow-xs">
                         <span className="text-[9px] font-bold text-gray-400 uppercase block">Total Claimed</span>
                         <div className="text-xl font-black text-slate-800 mt-1">{selfPerformanceStats.totalClaimed}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-white shadow-xs">
-                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Missing</span>
+                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Ready to work</span>
                         <div className="text-xl font-black text-amber-600 mt-1">{selfPerformanceStats.totalMissing}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-white shadow-xs">
-                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Processing</span>
+                        <span className="text-[9px] font-bold text-gray-400 uppercase block">In Progress</span>
                         <div className="text-xl font-black text-[rgba(138,21,56,0.85)] mt-1">{selfPerformanceStats.totalProcessing}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-white shadow-xs">
-                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Completed</span>
-                        <div className="text-xl font-black text-green-600 mt-1">{selfPerformanceStats.totalCompleted}</div>
+                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Under Review</span>
+                        <div className="text-xl font-black text-blue-600 mt-1">{selfPerformanceStats.totalCompleted}</div>
+                      </div>
+                      <div className="border p-4 rounded-xl bg-white shadow-xs">
+                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Ready to Upload</span>
+                        <div className="text-xl font-black text-emerald-600 mt-1">{selfPerformanceStats.totalReadyToUpload}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-white shadow-xs">
                         <span className="text-[9px] font-bold text-gray-400 uppercase block">Modified</span>
@@ -3565,11 +4421,11 @@ export default function IntegratedOperationsPortal() {
 
                     <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
                       <div className="border p-4 rounded-xl bg-green-50 border-green-100 shadow-xs">
-                        <span className="text-[9px] font-bold text-green-700 uppercase block">Completed This Week</span>
+                        <span className="text-[9px] font-bold text-green-700 uppercase block">Under Review This Week</span>
                         <div className="text-xl font-black text-green-700 mt-1">{selfPerformanceStats.weekCount}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-green-50 border-green-100 shadow-xs">
-                        <span className="text-[9px] font-bold text-green-700 uppercase block">Completed This Month</span>
+                        <span className="text-[9px] font-bold text-green-700 uppercase block">Under Review This Month</span>
                         <div className="text-xl font-black text-green-700 mt-1">{selfPerformanceStats.monthCount}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-[rgba(138,21,56,0.06)] border-[rgba(138,21,56,0.18)] shadow-xs">
@@ -3592,7 +4448,7 @@ export default function IntegratedOperationsPortal() {
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="border p-4 rounded-xl bg-white shadow-xs">
-                        <span className="text-[9px] font-bold text-gray-500 uppercase block">Average Time To Complete</span>
+                        <span className="text-[9px] font-bold text-gray-500 uppercase block">Average Time To Under Review</span>
                         <div className="text-lg font-black text-slate-900 mt-1">{selfPerformanceStats.avgCompletedTime}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-red-50 border-red-100 shadow-xs">
@@ -3600,11 +4456,11 @@ export default function IntegratedOperationsPortal() {
                         <div className="text-lg font-black text-red-800 mt-1">{selfPerformanceStats.avgRejectedTime}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-white shadow-xs">
-                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Fastest Completed Product</span>
+                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Fastest Under Review Product</span>
                         <div className="text-lg font-black text-emerald-700 mt-1">{selfPerformanceStats.fastestCompletedTime}</div>
                       </div>
                       <div className="border p-4 rounded-xl bg-white shadow-xs">
-                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Slowest Completed Product</span>
+                        <span className="text-[9px] font-bold text-gray-400 uppercase block">Slowest Under Review Product</span>
                         <div className="text-lg font-black text-orange-700 mt-1">{selfPerformanceStats.slowestCompletedTime}</div>
                       </div>
                     </div>
@@ -3613,7 +4469,7 @@ export default function IntegratedOperationsPortal() {
                       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-5">
                         <div>
                           <h2 className="text-xl font-black text-gray-900 uppercase tracking-tight">Done Product Time Log</h2>
-                          <p className="text-xs text-gray-400 font-semibold mt-1">Completed, modified, and rejected products assigned to you, with the tracked time spent on each item.</p>
+                          <p className="text-xs text-gray-400 font-semibold mt-1">Under review, ready to upload, modified, and rejected products assigned to you, with the tracked time spent on each item.</p>
                         </div>
                         <span className="text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 px-3 py-1 rounded-full border">
                           {selfPerformanceStats.doneProductLedger.length} done item(s)
@@ -3622,7 +4478,7 @@ export default function IntegratedOperationsPortal() {
 
                       {selfPerformanceStats.doneProductLedger.length === 0 ? (
                         <div className="text-center text-xs text-gray-400 font-bold uppercase py-12 border rounded-xl bg-gray-50">
-                          No completed, modified, or rejected products found yet.
+                          No under review, ready to upload, modified, or rejected products found yet.
                         </div>
                       ) : (
                         <div className="overflow-x-auto border rounded-xl">
@@ -3635,7 +4491,7 @@ export default function IntegratedOperationsPortal() {
                                 <th className="p-4 text-center">Images</th>
                                 <th className="p-4">Time Taken</th>
                                 <th className="p-4">Finished / Updated</th>
-                                <th className="p-4">Manager Note</th>
+                                <th className="p-4">Review Note</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200 text-sm text-gray-700">
@@ -3646,12 +4502,8 @@ export default function IntegratedOperationsPortal() {
                                     <span className="font-bold text-gray-900 line-clamp-2">{item.product_name}</span>
                                   </td>
                                   <td className="p-4">
-                                    <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase ${
-                                      item.status === 'Completed'
-                                        ? 'bg-green-50 text-green-700 border-green-200'
-                                        : 'bg-red-50 text-red-700 border-red-200'
-                                    }`}>
-                                      {item.status}
+                                    <span className={`px-3 py-1 rounded-full border text-[10px] font-black uppercase ${getStatusBadgeClass(item.status)}`}>
+                                      {getStatusLabel(item.status)}
                                     </span>
                                   </td>
                                   <td className="p-4 text-center text-xs font-black text-gray-600">
@@ -3670,7 +4522,7 @@ export default function IntegratedOperationsPortal() {
                       )}
 
                       <div className="mt-4 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold leading-relaxed">
-                        Note: time tracking starts when you change a product to Processing and stops when it becomes Completed or Rejected. Older products may show “No tracked time”.
+                        Note: time tracking starts when you change a product to In Progress and stops when it becomes Under Review or Rejected. Older products may show “No tracked time”.
                       </div>
                     </div>
                   </div>
@@ -3707,7 +4559,7 @@ export default function IntegratedOperationsPortal() {
                             <h4 className="text-sm font-bold text-slate-800">{sheetName}</h4>
                             <div className="flex items-center gap-2">
                               <button onClick={() => handleDownloadDashboardManifestByName(sheetName, 'live')} className="px-3 py-1.5 bg-[rgba(138,21,56,0.85)] text-white font-bold text-xs uppercase rounded-lg cursor-pointer hover:bg-[#8a1538]">Download Edited</button>
-                              <button onClick={() => handleDownloadMissingByName(sheetName)} className="px-3 py-1.5 bg-amber-500 text-white font-bold text-xs uppercase rounded-lg cursor-pointer hover:bg-amber-600">Download Missing</button>
+                              <button onClick={() => handleDownloadMissingByName(sheetName)} className="px-3 py-1.5 bg-amber-500 text-white font-bold text-xs uppercase rounded-lg cursor-pointer hover:bg-amber-600">Download Ready to Work</button>
                             </div>
                           </div>
                         ))}
@@ -3727,28 +4579,54 @@ export default function IntegratedOperationsPortal() {
                         </p>
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          onClick={() => handleBulkDownloadAssetDirectory(assetDirectoryProducts, 'all')}
-                          disabled={uploading || assetDirectoryProducts.length === 0 || (assetDirectoryRawCount + assetDirectoryEditedCount) === 0}
-                          className="px-3 py-2 bg-[rgba(138,21,56,0.85)] hover:bg-[#8a1538] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
-                        >
-                          ⬇️ Bulk All
-                        </button>
-                        <button
-                          onClick={() => handleBulkDownloadAssetDirectory(assetDirectoryProducts, 'raw')}
-                          disabled={uploading || assetDirectoryRawCount === 0}
-                          className="px-3 py-2 bg-[rgba(138,21,56,0.95)] hover:bg-[rgba(138,21,56,0.85)] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
-                        >
-                          RAW ZIP
-                        </button>
-                        <button
-                          onClick={() => handleBulkDownloadAssetDirectory(assetDirectoryProducts, 'edited')}
-                          disabled={uploading || assetDirectoryEditedCount === 0}
-                          className="px-3 py-2 bg-[rgba(138,21,56,0.85)] hover:bg-[#8a1538] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
-                        >
-                          EDITED ZIP
-                        </button>
+                      <div className="flex flex-col sm:items-end gap-2">
+                        <div className="flex flex-wrap items-center gap-2 justify-start sm:justify-end">
+                          <button
+                            onClick={() => handleBulkDownloadAssetDirectory(assetDirectoryProducts, 'all')}
+                            disabled={uploading || assetDirectoryProducts.length === 0 || (assetDirectoryRawCount + assetDirectoryEditedCount) === 0}
+                            className="px-3 py-2 bg-[rgba(138,21,56,0.85)] hover:bg-[#8a1538] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
+                          >
+                            ⬇️ All Visible
+                          </button>
+                          <button
+                            onClick={() => handleBulkDownloadAssetDirectory(assetDirectoryProducts, 'raw')}
+                            disabled={uploading || assetDirectoryRawCount === 0}
+                            className="px-3 py-2 bg-[rgba(138,21,56,0.95)] hover:bg-[rgba(138,21,56,0.85)] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
+                          >
+                            Visible RAW
+                          </button>
+                          <button
+                            onClick={() => handleBulkDownloadAssetDirectory(assetDirectoryProducts, 'edited')}
+                            disabled={uploading || assetDirectoryEditedCount === 0}
+                            className="px-3 py-2 bg-[rgba(138,21,56,0.85)] hover:bg-[#8a1538] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
+                          >
+                            Visible EDITED
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 justify-start sm:justify-end">
+                          <button
+                            onClick={() => handleBulkDownloadAssetDirectory(selectedAssetDirectoryProducts, 'all')}
+                            disabled={uploading || selectedAssetDirectoryProducts.length === 0 || (selectedAssetRawCount + selectedAssetEditedCount) === 0}
+                            className="px-3 py-2 bg-gray-900 hover:bg-black disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
+                          >
+                            Selected All ({selectedAssetDirectoryProducts.length})
+                          </button>
+                          <button
+                            onClick={() => handleBulkDownloadAssetDirectory(selectedAssetDirectoryProducts, 'raw')}
+                            disabled={uploading || selectedAssetRawCount === 0}
+                            className="px-3 py-2 bg-slate-700 hover:bg-slate-800 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
+                          >
+                            Selected RAW
+                          </button>
+                          <button
+                            onClick={() => handleBulkDownloadAssetDirectory(selectedAssetDirectoryProducts, 'edited')}
+                            disabled={uploading || selectedAssetEditedCount === 0}
+                            className="px-3 py-2 bg-[#8a1538] hover:bg-[rgba(138,21,56,0.95)] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
+                          >
+                            Selected EDITED
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -3796,6 +4674,31 @@ export default function IntegratedOperationsPortal() {
                       </div>
                     </div>
 
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 bg-white border border-gray-200 rounded-2xl p-4">
+                      <div>
+                        <div className="text-xs font-black text-gray-900 uppercase tracking-wider">Selected Asset Folders: {selectedAssetDirectoryProducts.length}</div>
+                        <p className="text-[11px] text-gray-400 font-bold mt-1">Selected images available: RAW {selectedAssetRawCount} / EDITED {selectedAssetEditedCount}. Select products below, then download only those folders.</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={handleSelectAllVisibleAssetProducts}
+                          disabled={assetDirectoryProducts.length === 0}
+                          className="px-3 py-2 bg-gray-100 hover:bg-gray-200 disabled:opacity-50 text-gray-700 rounded-xl text-[10px] font-black uppercase tracking-wider"
+                        >
+                          {allVisibleAssetProductsSelected ? 'Unselect Visible' : 'Select Visible'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearAssetProductSelection}
+                          disabled={selectedAssetProductIds.length === 0}
+                          className="px-3 py-2 bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-700 border border-red-100 rounded-xl text-[10px] font-black uppercase tracking-wider"
+                        >
+                          Clear Selection
+                        </button>
+                      </div>
+                    </div>
+
                     {assetDirectoryProducts.length === 0 ? (
                       <div className="text-center text-xs text-gray-400 font-bold uppercase py-12 bg-gray-50 rounded-2xl border border-dashed">
                         No image folders found for the selected search/store filter.
@@ -3806,14 +4709,24 @@ export default function IntegratedOperationsPortal() {
                           const raws = getArray(prod.raw_image_url).filter(Boolean);
                           const edits = getArray(prod.edited_image_url).filter(Boolean);
                           return (
-                            <div key={prod.id} className="p-5 border rounded-2xl bg-white shadow-xs hover:border-[rgba(138,21,56,0.28)] transition-colors">
+                            <div key={prod.id} className={`p-5 border rounded-2xl bg-white shadow-xs hover:border-[rgba(138,21,56,0.28)] transition-colors ${selectedAssetProductIds.includes(prod.id) ? 'ring-2 ring-[rgba(138,21,56,0.35)] border-[rgba(138,21,56,0.45)]' : ''}`}>
                               <div className="flex items-start justify-between gap-3 mb-4">
-                                <div>
-                                  <span className="text-xs font-mono font-black text-[#8a1538] bg-[rgba(138,21,56,0.06)] px-2.5 py-1 rounded-md block w-fit">📁 SKU: {prod.sku || 'UNKNOWN'}</span>
-                                  <div className="text-[11px] font-bold text-gray-400 mt-2">{prod.product_name || 'Unnamed Product'}</div>
-                                  <div className="text-[10px] font-black uppercase tracking-wider text-emerald-700 mt-1">{getStoreNameById(prod.store_id)}</div>
+                                <div className="flex items-start gap-3 min-w-0">
+                                  <label className="mt-1 w-5 h-5 flex items-center justify-center cursor-pointer shrink-0" title="Select this product for bulk download">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedAssetProductIds.includes(prod.id)}
+                                      onChange={() => toggleAssetProductSelection(prod.id)}
+                                      className="w-4 h-4 accent-[#8a1538] cursor-pointer"
+                                    />
+                                  </label>
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-mono font-black text-[#8a1538] bg-[rgba(138,21,56,0.06)] px-2.5 py-1 rounded-md block w-fit">📁 SKU: {prod.sku || 'UNKNOWN'}</span>
+                                    <div className="text-[11px] font-bold text-gray-400 mt-2 line-clamp-2">{prod.product_name || 'Unnamed Product'}</div>
+                                    <div className="text-[10px] font-black uppercase tracking-wider text-emerald-700 mt-1">{getStoreNameById(prod.store_id)}</div>
+                                  </div>
                                 </div>
-                                <span className="text-[10px] font-black px-2 py-1 rounded-lg bg-gray-100 text-gray-600 uppercase">{prod.status || 'Missing'}</span>
+                                <span className="text-[10px] font-black px-2 py-1 rounded-lg bg-gray-100 text-gray-600 uppercase shrink-0">{getStatusLabel(prod.status)}</span>
                               </div>
 
                               <div className="space-y-4">
@@ -3904,17 +4817,60 @@ export default function IntegratedOperationsPortal() {
         </div>
       )}
 
+      {/* GOOGLE SHEETS LINK MODAL */}
+      {showGoogleSheetModal && (authRole === 'Admin' || authRole === 'Manager') && (
+        <div className="fixed inset-0 bg-[rgba(138,21,56,1)]/60 backdrop-blur-md flex items-center justify-center p-4 z-[75] animate-fadeIn">
+          <div className="bg-white border rounded-3xl w-full max-w-lg shadow-2xl p-8 overflow-hidden">
+            <div className="flex items-center justify-between border-b pb-4 mb-6">
+              <div>
+                <h3 className="font-black text-lg text-gray-900 uppercase">Google Sheets Link</h3>
+                <p className="text-xs font-semibold text-gray-400 mt-1">Only authorized users can save this. Staff can open it from Home.</p>
+              </div>
+              <button onClick={() => setShowGoogleSheetModal(false)} className="text-gray-400 text-xl cursor-pointer hover:text-gray-900">✕</button>
+            </div>
+            <form onSubmit={handleSaveGoogleSheetLink} className="space-y-4">
+              <div>
+                <label className="block text-xxs font-black uppercase text-gray-400 tracking-widest mb-1.5">Google Sheet URL</label>
+                <input
+                  type="url"
+                  required
+                  value={googleSheetDraft}
+                  onChange={(e) => setGoogleSheetDraft(e.target.value)}
+                  placeholder="https://docs.google.com/spreadsheets/d/..."
+                  className="w-full px-4 py-3 text-sm border rounded-xl bg-gray-50 text-gray-900 outline-none"
+                />
+              </div>
+              {googleSheetLink && (
+                <button
+                  type="button"
+                  onClick={openGoogleSheetLink}
+                  className="w-full py-2.5 bg-gray-50 hover:bg-gray-100 border border-gray-200 text-gray-700 text-xs font-black uppercase rounded-xl"
+                >
+                  Open Current Google Sheet
+                </button>
+              )}
+              <div className="flex gap-3 pt-3">
+                <button type="button" onClick={() => setShowGoogleSheetModal(false)} className="w-1/3 py-3 border rounded-xl text-xs font-bold uppercase text-gray-600 hover:bg-gray-50">Cancel</button>
+                <button type="submit" disabled={googleSheetSaving} className="w-2/3 py-3 bg-[#8a1538] hover:bg-[rgba(138,21,56,0.95)] text-white text-xs uppercase font-black rounded-xl cursor-pointer disabled:opacity-60">
+                  {googleSheetSaving ? 'Saving...' : 'Save Google Sheet Link'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* CUSTOM DEPARTMENT MODAL */}
       {showRoleModal && (
         <div className="fixed inset-0 bg-[rgba(138,21,56,1)]/60 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fadeIn">
           <div className="bg-white border rounded-3xl w-full max-w-md shadow-2xl p-6 overflow-hidden">
             <div className="flex items-center justify-between border-b pb-3 mb-5">
-              <h3 className="font-black text-base text-gray-900 uppercase">Deploy Custom Role Perms</h3>
+              <h3 className="font-black text-base text-gray-900 uppercase">Deploy Custom Permissions</h3>
               <button onClick={() => setShowRoleModal(false)} className="text-gray-400 text-lg cursor-pointer">✕</button>
             </div>
             <form onSubmit={handleCreateCustomRole} className="space-y-5">
               <div>
-                <label className="block text-xxs font-black uppercase text-gray-400 tracking-widest mb-1.5">Bespoke Role Name</label>
+                <label className="block text-xxs font-black uppercase text-gray-400 tracking-widest mb-1.5">Custom Group Name</label>
                 <input 
                   type="text" required value={newRoleForm.roleName} onChange={(e) => setNewRoleForm({...newRoleForm, roleName: e.target.value})} placeholder="e.g. Lead Editor..." 
                   className="w-full px-4 py-2.5 text-sm border rounded-xl bg-gray-50 text-gray-900"
@@ -3926,7 +4882,7 @@ export default function IntegratedOperationsPortal() {
               </div>
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowRoleModal(false)} className="w-1/3 py-2.5 border rounded-xl text-xs font-bold text-gray-600">Cancel</button>
-                <button type="submit" className="w-2/3 py-2.5 bg-[#8a1538] text-white text-xs uppercase font-black rounded-xl cursor-pointer">Deploy Role</button>
+                <button type="submit" className="w-2/3 py-2.5 bg-[#8a1538] text-white text-xs uppercase font-black rounded-xl cursor-pointer">Deploy Group</button>
               </div>
             </form>
           </div>
@@ -3944,26 +4900,30 @@ export default function IntegratedOperationsPortal() {
 
             <div className="space-y-5 text-xs font-semibold text-gray-500">
               <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                <span className="text-[10px] font-black tracking-wider text-gray-400 uppercase block">Operator Target Profile ID</span>
+                <span className="text-[10px] font-black tracking-wider text-gray-400 uppercase block">Staff Profile</span>
                 <div className="text-base font-black text-slate-800 mt-1">👤 {selectedOperatorStats.username}</div>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-7 gap-4">
                 <div className="border p-4 rounded-xl bg-white shadow-xxs">
                   <span className="text-[9px] font-bold text-gray-400 uppercase block">Total Claimed</span>
                   <div className="text-xl font-black text-slate-800 mt-1">{selectedOperatorStats.performance.totalClaimed}</div>
                 </div>
                 <div className="border p-4 rounded-xl bg-white shadow-xxs">
-                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Missing</span>
+                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Ready to work</span>
                   <div className="text-xl font-black text-amber-600 mt-1">{selectedOperatorStats.performance.totalMissing}</div>
                 </div>
                 <div className="border p-4 rounded-xl bg-white shadow-xxs">
-                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Processing</span>
+                  <span className="text-[9px] font-bold text-gray-400 uppercase block">In Progress</span>
                   <div className="text-xl font-black text-[rgba(138,21,56,0.85)] mt-1">{selectedOperatorStats.performance.totalProcessing}</div>
                 </div>
                 <div className="border p-4 rounded-xl bg-white shadow-xxs">
-                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Completed</span>
-                  <div className="text-xl font-black text-green-600 mt-1">{selectedOperatorStats.performance.totalCompleted}</div>
+                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Under Review</span>
+                  <div className="text-xl font-black text-blue-600 mt-1">{selectedOperatorStats.performance.totalCompleted}</div>
+                </div>
+                <div className="border p-4 rounded-xl bg-white shadow-xxs">
+                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Ready to Upload</span>
+                  <div className="text-xl font-black text-emerald-600 mt-1">{selectedOperatorStats.performance.totalReadyToUpload}</div>
                 </div>
                 <div className="border p-4 rounded-xl bg-white shadow-xxs">
                   <span className="text-[9px] font-bold text-gray-400 uppercase block">Modified</span>
@@ -3977,11 +4937,11 @@ export default function IntegratedOperationsPortal() {
 
               <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
                 <div className="border p-4 rounded-xl bg-green-50 border-green-100">
-                  <span className="text-[9px] font-bold text-green-700 uppercase block">Completed This Week</span>
+                  <span className="text-[9px] font-bold text-green-700 uppercase block">Under Review This Week</span>
                   <div className="text-xl font-black text-green-700 mt-1">{selectedOperatorStats.performance.weekCount}</div>
                 </div>
                 <div className="border p-4 rounded-xl bg-green-50 border-green-100">
-                  <span className="text-[9px] font-bold text-green-700 uppercase block">Completed This Month</span>
+                  <span className="text-[9px] font-bold text-green-700 uppercase block">Under Review This Month</span>
                   <div className="text-xl font-black text-green-700 mt-1">{selectedOperatorStats.performance.monthCount}</div>
                 </div>
                 <div className="border p-4 rounded-xl bg-[rgba(138,21,56,0.06)] border-[rgba(138,21,56,0.18)]">
@@ -4015,17 +4975,17 @@ export default function IntegratedOperationsPortal() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="border p-4 rounded-xl bg-white">
-                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Fastest Completed Product</span>
+                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Fastest Under Review Product</span>
                   <div className="text-lg font-black text-emerald-700 mt-1">{selectedOperatorStats.performance.fastestCompletedTime}</div>
                 </div>
                 <div className="border p-4 rounded-xl bg-white">
-                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Slowest Completed Product</span>
+                  <span className="text-[9px] font-bold text-gray-400 uppercase block">Slowest Under Review Product</span>
                   <div className="text-lg font-black text-orange-700 mt-1">{selectedOperatorStats.performance.slowestCompletedTime}</div>
                 </div>
               </div>
 
               <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold leading-relaxed">
-                Note: time tracking starts when the employee changes status to Processing. Older products completed before this update may show “No tracked time” because their timer was not recorded.
+                Note: time tracking starts when the employee changes status to In Progress. Older products completed before this update may show “No tracked time” because their timer was not recorded.
               </div>
             </div>
 
@@ -4038,10 +4998,14 @@ export default function IntegratedOperationsPortal() {
       {selectedProduct && (() => {
         const rawAssets = getArray(selectedProduct.raw_image_url);
         const editAssets = getArray(selectedProduct.edited_image_url);
+        const isAdminOrManager = authRole === 'Admin' || authRole === 'Manager';
+        const isReadyToUploadLockedForEmployee = selectedProduct.status === 'Ready to Upload' && !isAdminOrManager;
         const canUploadProductImages =
-          authRole === 'Admin' ||
-          authRole === 'Manager' ||
-          (selectedProduct.status === 'Processing' && selectedProduct.processed_by === loginUser);
+          isAdminOrManager ||
+          (!isReadyToUploadLockedForEmployee && selectedProduct.status === 'Processing' && selectedProduct.processed_by === loginUser);
+        const canRemoveEditedImages =
+          isAdminOrManager ||
+          (!isReadyToUploadLockedForEmployee && selectedProduct.processed_by === loginUser && ['Processing', 'Rejected'].includes(selectedProduct.status));
         const isUploadingImagesForThisProduct = imageUploadingProductId === selectedProduct.id;
         return (
           <div className="fixed inset-0 bg-[rgba(138,21,56,0.85)]/60 backdrop-blur-xs flex items-center justify-center p-4 z-[60] animate-fadeIn">
@@ -4055,39 +5019,48 @@ export default function IntegratedOperationsPortal() {
                   <div><label className="block text-xxs font-black text-gray-400 uppercase">Stock Level</label><div className="text-sm font-bold text-gray-900">{selectedProduct.stock_quantity} Units</div></div>
                   <div><label className="block text-xxs font-black text-gray-400 uppercase mb-1">Operational Status</label>
                     <select 
-                      value={selectedProduct.status || 'Missing'} 
+                      value={selectedProduct.status === 'Completed' ? 'Under Review' : (selectedProduct.status || 'Missing')} 
                       onChange={(e) => handleOperatorStatusChange(selectedProduct.id, e.target.value)}
-                      className={`w-full text-xs font-bold uppercase rounded-lg p-2 border shadow-sm focus:outline-none focus:ring-2 focus:ring-[#8a1538] cursor-pointer ${
-                        selectedProduct.status === 'Rejected'
-                          ? 'bg-red-50 border-red-200 text-red-700'
-                          : 'bg-white border-gray-300 text-gray-900'
+                      disabled={isReadyToUploadLockedForEmployee}
+                      className={`w-full text-xs font-bold uppercase rounded-lg p-2 border shadow-sm focus:outline-none focus:ring-2 focus:ring-[#8a1538] ${
+                        isReadyToUploadLockedForEmployee
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700 cursor-not-allowed'
+                          : selectedProduct.status === 'Rejected'
+                            ? 'bg-red-50 border-red-200 text-red-700 cursor-pointer'
+                            : 'bg-white border-gray-300 text-gray-900 cursor-pointer'
                       }`}
                     >
-                      <option value="Missing" disabled={selectedProduct.status === 'Rejected'}>Missing</option>
-                      <option value="Processing">Processing</option>
-                      <option value="Completed" disabled={selectedProduct.status === 'Rejected'}>Completed</option>
-                      <option value="Modified" disabled>Modified</option>
+                      <option value="Missing" disabled={selectedProduct.status === 'Rejected'}>Ready to work</option>
+                      <option value="Processing">In Progress</option>
+                      <option value="Under Review" disabled={selectedProduct.status === 'Rejected'}>Under Review</option>
                       <option value="Rejected" disabled>Rejected</option>
+                      <option value="Ready to Upload" disabled={!isAdminOrManager}>Ready to Upload</option>
+                      <option value="Modified" disabled>Modified</option>
                     </select>
                   </div>
                 </div>
+                {isReadyToUploadLockedForEmployee && (
+                  <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-800 text-xs font-bold">
+                    ✅ This product is marked <span className="underline">Ready to Upload</span>. It is now locked for employees. Only authorized users can change its status or remove images.
+                  </div>
+                )}
                 {selectedProduct.status === 'Rejected' && (
                   <div className="p-4 rounded-xl border border-red-200 bg-red-50">
                     <div className="text-xs font-black text-red-700 uppercase tracking-wider mb-2">
-                      Rejected by Manager
+                      Rejected after review
                     </div>
                     <p className="text-sm font-semibold text-red-900 whitespace-pre-wrap">
                       {selectedProduct.rejection_note || 'No rejection note was provided.'}
                     </p>
                     <p className="text-[11px] text-red-600 font-bold mt-3">
-                      Change the status to <span className="underline">Processing</span> to reopen this item, upload corrected images, and then mark it Completed again.
+                      Change the status to <span className="underline">In Progress</span> to reopen this item, upload corrected images, and then submit it for Under Review again.
                     </p>
                   </div>
                 )}
 
-                {!canUploadProductImages && (
+                {!canUploadProductImages && !isReadyToUploadLockedForEmployee && (
                   <div className={`p-4 rounded-xl border text-xs font-bold ${selectedProduct.status === 'Rejected' ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
-                    🔒 Image upload is locked. Change Operational Status to <span className="underline">Processing</span> first. That claims/reopens this product under your employee name and unlocks RAW/EDITED uploads.
+                    🔒 Image upload is locked. Change Operational Status to <span className="underline">In Progress</span> first. That claims/reopens this product under your employee name and unlocks RAW/EDITED uploads.
                   </div>
                 )}
 
@@ -4122,7 +5095,7 @@ export default function IntegratedOperationsPortal() {
                         </label>
                       ) : (
                         <div className="w-full h-20 border-2 border-dashed rounded flex flex-col items-center justify-center text-center text-gray-400 bg-gray-50 text-[10px] font-black uppercase tracking-wider">
-                          🔒 Set Processing First
+                          🔒 Set In Progress First
                         </div>
                       )}
                     </div>
@@ -4141,7 +5114,28 @@ export default function IntegratedOperationsPortal() {
                       </button>
                     </div>
                     <div className="grid grid-cols-3 gap-2">
-                      {editAssets.map((url, i) => (<img src={url} className="w-full h-20 object-cover border rounded" key={url} />))}
+                      {editAssets.map((url, i) => (
+                        <div key={url} className="relative group rounded border overflow-hidden bg-gray-50">
+                          <img src={url} className="w-full h-20 object-cover" alt={`Edited ${i + 1}`} />
+                          <div className="absolute left-1 top-1 bg-black/60 text-white text-[8px] font-black px-1.5 py-0.5 rounded uppercase">
+                            #{i + 1}
+                          </div>
+                          {canRemoveEditedImages && (
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleRemoveIndividualImage(selectedProduct.id, 'edited', url);
+                              }}
+                              disabled={imageUploadingProductId === selectedProduct.id}
+                              className="absolute right-1 top-1 bg-red-600 hover:bg-red-700 disabled:bg-gray-400 text-white text-[8px] font-black px-1.5 py-0.5 rounded uppercase shadow"
+                              title="Remove this edited image"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+                      ))}
                       
                       {canUploadProductImages ? (
                         <label className={`w-full h-20 border-2 border-dashed rounded flex flex-col items-center justify-center font-bold text-center transition-colors ${isUploadingImagesForThisProduct ? 'cursor-not-allowed bg-gray-100 text-gray-400' : 'cursor-pointer text-gray-400 hover:bg-gray-50 hover:text-gray-600'}`}>
@@ -4158,11 +5152,14 @@ export default function IntegratedOperationsPortal() {
                         </label>
                       ) : (
                         <div className="w-full h-20 border-2 border-dashed rounded flex flex-col items-center justify-center text-center text-gray-400 bg-gray-50 text-[10px] font-black uppercase tracking-wider">
-                          🔒 Set Processing First
+                          🔒 Set In Progress First
                         </div>
                       )}
                     </div>
-                    <p className="text-[10px] text-gray-400 font-semibold mt-2">You can select 5, 10, or more EDITED images at once.</p>
+                    <p className="text-[10px] text-gray-400 font-semibold mt-2">
+                      You can select 5, 10, or more EDITED images at once.
+                      {canRemoveEditedImages ? ' Use Remove on any edited image added by mistake or rejected after review.' : ''}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -4176,13 +5173,59 @@ export default function IntegratedOperationsPortal() {
         const rawAssets = getArray(managerPreview.raw_image_url);
         const editAssets = getArray(managerPreview.edited_image_url);
         const cleanSku = String(managerPreview.sku || 'UNKNOWN').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const managerGalleryImages = [
+          ...rawAssets.map((url, index) => ({ url, label: `RAW Image ${index + 1}`, sku: managerPreview.sku, typeLabel: 'RAW', groupIndex: index })),
+          ...editAssets.map((url, index) => ({ url, label: `EDITED Image ${index + 1}`, sku: managerPreview.sku, typeLabel: 'EDITED', groupIndex: index }))
+        ];
+        const comparisonRows = Array.from({ length: Math.max(rawAssets.length, editAssets.length) }, (_, index) => ({
+          raw: rawAssets[index],
+          edited: editAssets[index],
+          index
+        }));
+        const openManagerGalleryAt = (url) => {
+          const index = managerGalleryImages.findIndex(item => item.url === url);
+          const safeIndex = index >= 0 ? index : 0;
+          if (managerGalleryImages[safeIndex]) {
+            setFullViewImage({ ...managerGalleryImages[safeIndex], images: managerGalleryImages, index: safeIndex });
+          }
+        };
+        const openFullCompareAt = (index = 0) => {
+          if (comparisonRows.length === 0) return;
+          setFullCompareIndex(Math.min(Math.max(index, 0), comparisonRows.length - 1));
+        };
+        const renderCompareImage = (url, typeLabel, index) => {
+          if (!url) {
+            return (
+              <div className="h-52 rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 flex items-center justify-center text-[11px] font-black uppercase tracking-wider text-gray-400">
+                No {typeLabel} image #{index + 1}
+              </div>
+            );
+          }
+
+          return (
+            <button
+              type="button"
+              onClick={() => openManagerGalleryAt(url)}
+              className="relative h-52 rounded-xl overflow-hidden border bg-gray-50 group cursor-zoom-in"
+              title={`Open ${typeLabel} image ${index + 1}`}
+            >
+              <img src={url} alt={`${typeLabel} comparison image ${index + 1}`} className="w-full h-full object-contain bg-white" />
+              <span className={`absolute left-3 top-3 px-2 py-1 rounded-lg text-[10px] font-black uppercase border ${typeLabel === 'RAW' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-[rgba(138,21,56,0.06)] text-[#8a1538] border-[rgba(138,21,56,0.18)]'}`}>
+                {typeLabel} #{index + 1}
+              </span>
+              <span className="absolute inset-x-0 bottom-0 bg-black/55 text-white text-[10px] font-black uppercase tracking-wider py-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                Click to open full view
+              </span>
+            </button>
+          );
+        };
         const renderManagerAssetCard = (url, typeLabel, index) => {
           const filename = `${cleanSku}_${typeLabel.toLowerCase()}_${index + 1}.jpg`;
           return (
             <div key={`${typeLabel}-${url}-${index}`} className="relative group border rounded-xl overflow-hidden bg-gray-50">
               <button
                 type="button"
-                onClick={() => setFullViewImage({ url, label: `${typeLabel} Image ${index + 1}`, sku: managerPreview.sku })}
+                onClick={() => openManagerGalleryAt(url)}
                 className="block w-full cursor-zoom-in"
                 title="Open full view"
               >
@@ -4191,7 +5234,7 @@ export default function IntegratedOperationsPortal() {
               <div className="p-2 flex gap-2 bg-white border-t">
                 <button
                   type="button"
-                  onClick={() => setFullViewImage({ url, label: `${typeLabel} Image ${index + 1}`, sku: managerPreview.sku })}
+                  onClick={() => openManagerGalleryAt(url)}
                   className="flex-1 px-2 py-1.5 bg-[rgba(138,21,56,0.85)] text-white rounded-lg text-[10px] font-black uppercase"
                 >
                   Full View
@@ -4209,13 +5252,48 @@ export default function IntegratedOperationsPortal() {
         };
         return (
           <div className="fixed inset-0 bg-[rgba(138,21,56,0.85)]/60 backdrop-blur-sm flex items-center justify-center p-4 z-[80]">
-            <div className="bg-white rounded-2xl w-full max-w-6xl p-8 shadow-2xl max-h-[95vh] overflow-y-auto flex flex-col">
+            <div className="bg-white rounded-2xl w-full max-w-7xl p-8 shadow-2xl max-h-[95vh] overflow-y-auto flex flex-col">
               <div className="flex flex-col md:flex-row md:justify-between md:items-start gap-4 mb-6 border-b pb-4">
                 <div>
                   <h2 className="text-2xl font-black text-gray-900">{managerPreview.product_name}</h2>
-                  <p className="text-xs text-gray-400 font-bold mt-1">SKU: {managerPreview.sku} • Status: {managerPreview.status}</p>
+                  <p className="text-xs text-gray-400 font-bold mt-1">SKU: {managerPreview.sku} • Status: {getStatusLabel(managerPreview.status)}</p>
+                  <p className="text-[11px] text-gray-400 font-semibold mt-1">Tip: open any image, then use ← / → keyboard keys or the side arrows to move between images.</p>
+                  {(authRole === 'Admin' || authRole === 'Manager') && (
+                    <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2">
+                      <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Status Override</span>
+                      <select
+                        value={managerPreview.status === 'Completed' ? 'Under Review' : (managerPreview.status || 'Missing')}
+                        onChange={(e) => handleOperatorStatusChange(managerPreview.id, e.target.value)}
+                        className="w-full sm:w-56 px-3 py-2 border border-gray-200 rounded-xl bg-white text-gray-900 text-[11px] font-black uppercase outline-none"
+                      >
+                        <option value="Missing">Ready to work</option>
+                        <option value="Processing">In Progress</option>
+                        <option value="Under Review">Under Review</option>
+                        <option value="Rejected" disabled>Rejected - use Reject button</option>
+                        <option value="Ready to Upload">Ready to Upload</option>
+                        <option value="Modified" disabled>Modified</option>
+                      </select>
+                    </div>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-2 items-center">
+                  <button
+                    type="button"
+                    onClick={() => setShowManagerCompare(prev => !prev)}
+                    disabled={comparisonRows.length === 0}
+                    className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${showManagerCompare ? 'bg-[#8a1538] text-white border-[#8a1538]' : 'bg-white text-[#8a1538] border-[rgba(138,21,56,0.28)] hover:bg-[rgba(138,21,56,0.06)]'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                  >
+                    {showManagerCompare ? 'Hide Compare' : 'Compare'}
+                  </button>
+                  {showManagerCompare && comparisonRows.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => openFullCompareAt(0)}
+                      className="px-3 py-2 bg-gray-900 text-white border border-gray-900 rounded-xl text-[10px] font-black uppercase hover:bg-black"
+                    >
+                      Full Screen Compare
+                    </button>
+                  )}
                   <button
                     onClick={() => handleDownloadProductAssets(managerPreview, 'raw')}
                     disabled={rawAssets.length === 0 || uploading}
@@ -4233,6 +5311,58 @@ export default function IntegratedOperationsPortal() {
                   <button onClick={closeManagerPreview} className="text-gray-400 font-bold text-2xl hover:text-gray-900 cursor-pointer px-2">✕</button>
                 </div>
               </div>
+
+              {showManagerCompare && (
+                <div className="mb-8 p-5 rounded-2xl border border-gray-200 bg-gray-50">
+                  <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-4">
+                    <div>
+                      <h3 className="text-sm font-black text-gray-900 uppercase tracking-tight">RAW vs EDITED Comparison</h3>
+                      <p className="text-xs text-gray-500 font-semibold mt-1">Compare matching RAW and EDITED images side-by-side before approving or rejecting.</p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[10px] font-black uppercase tracking-wider bg-white border border-gray-200 text-gray-500 px-3 py-1 rounded-full">
+                        {rawAssets.length} RAW / {editAssets.length} EDITED
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => openFullCompareAt(0)}
+                        disabled={comparisonRows.length === 0}
+                        className="px-3 py-1.5 bg-gray-900 hover:bg-black disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-lg text-[10px] font-black uppercase"
+                      >
+                        Open Full Screen
+                      </button>
+                    </div>
+                  </div>
+
+                  {comparisonRows.length === 0 ? (
+                    <div className="h-40 rounded-xl border-2 border-dashed flex items-center justify-center text-xs font-bold text-gray-400 uppercase bg-white">
+                      No images available for comparison
+                    </div>
+                  ) : (
+                    <div className="space-y-4 max-h-[620px] overflow-y-auto pr-1">
+                      {comparisonRows.map((row) => (
+                        <div key={`compare-${row.index}`} className="grid grid-cols-1 lg:grid-cols-2 gap-4 bg-white border rounded-2xl p-4">
+                          <div>
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="text-[10px] font-black uppercase tracking-wider text-amber-700">RAW Image {row.index + 1}</div>
+                              <button type="button" onClick={() => openFullCompareAt(row.index)} className="text-[9px] font-black uppercase text-gray-500 hover:text-gray-900">Full Screen Pair</button>
+                            </div>
+                            {renderCompareImage(row.raw, 'RAW', row.index)}
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="text-[10px] font-black uppercase tracking-wider text-[#8a1538]">EDITED Image {row.index + 1}</div>
+                              <button type="button" onClick={() => openFullCompareAt(row.index)} className="text-[9px] font-black uppercase text-gray-500 hover:text-gray-900">Full Screen Pair</button>
+                            </div>
+                            {renderCompareImage(row.edited, 'EDITED', row.index)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-6">
                 <div>
                   <div className="flex items-center justify-between mb-3">
@@ -4258,7 +5388,11 @@ export default function IntegratedOperationsPortal() {
                 </div>
               </div>
               {!isRejecting ? (
-                <div className="flex gap-4"><button onClick={() => setIsRejecting(true)} className="w-1/3 py-3 bg-red-50 text-red-600 hover:bg-red-100 font-bold rounded-xl text-sm border uppercase cursor-pointer transition-colors">Reject</button><button onClick={closeManagerPreview} className="w-2/3 py-3 bg-gray-100 hover:bg-gray-200 font-bold rounded-xl text-sm text-gray-600 uppercase cursor-pointer transition-colors">Close</button></div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <button onClick={() => setIsRejecting(true)} className="py-3 bg-red-50 text-red-600 hover:bg-red-100 font-bold rounded-xl text-sm border uppercase cursor-pointer transition-colors">Reject</button>
+                  <button onClick={() => handleReadyToUploadProduct(managerPreview.id)} className="py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-sm border border-emerald-700 uppercase cursor-pointer transition-colors">Ready to Upload</button>
+                  <button onClick={closeManagerPreview} className="py-3 bg-gray-100 hover:bg-gray-200 font-bold rounded-xl text-sm text-gray-600 uppercase cursor-pointer transition-colors">Close</button>
+                </div>
               ) : (
                 <div className="p-5 bg-red-50 border border-red-200 rounded-xl">
                   <textarea className="w-full p-3 border rounded-lg text-sm mb-4 bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-red-500" rows="3" placeholder="Provide rejection reasons..." value={rejectNote} onChange={(e) => setRejectNote(e.target.value)}></textarea>
@@ -4270,26 +5404,165 @@ export default function IntegratedOperationsPortal() {
         );
       })()}
 
-      {/* FULL IMAGE VIEWER MODAL */}
-      {fullViewImage && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 z-[100]">
-          <div className="bg-white rounded-2xl w-full max-w-6xl max-h-[95vh] overflow-hidden shadow-2xl flex flex-col">
-            <div className="p-4 border-b flex items-center justify-between gap-4">
-              <div>
-                <h3 className="text-sm font-black text-gray-900 uppercase">{fullViewImage.label}</h3>
-                <p className="text-[10px] font-bold text-gray-400">SKU: {fullViewImage.sku || 'UNKNOWN'}</p>
+      {/* FULLSCREEN RAW / EDITED COMPARE MODAL */}
+      {managerPreview && fullCompareIndex !== null && (() => {
+        const rawAssets = getArray(managerPreview.raw_image_url);
+        const editAssets = getArray(managerPreview.edited_image_url);
+        const pairCount = Math.max(rawAssets.length, editAssets.length);
+        if (pairCount === 0) return null;
+
+        const safeIndex = Math.min(Math.max(Number.isInteger(fullCompareIndex) ? fullCompareIndex : 0, 0), pairCount - 1);
+        const rawUrl = rawAssets[safeIndex];
+        const editedUrl = editAssets[safeIndex];
+        const cleanSku = String(managerPreview.sku || 'UNKNOWN').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const moveComparePair = (direction) => {
+          setFullCompareIndex(prev => ((Number.isInteger(prev) ? prev : safeIndex) + direction + pairCount) % pairCount);
+        };
+        const renderLargeCompareImage = (url, typeLabel) => {
+          if (!url) {
+            return (
+              <div className="min-h-[65vh] rounded-2xl border-2 border-dashed border-gray-300 bg-gray-50 flex items-center justify-center text-sm font-black uppercase tracking-wider text-gray-400">
+                No {typeLabel} image for pair {safeIndex + 1}
               </div>
-              <div className="flex gap-2">
-                <button onClick={() => handleDownloadSingleAsset(fullViewImage.url, `${String(fullViewImage.sku || 'image').replace(/[^a-zA-Z0-9_-]/g, '_')}_${String(fullViewImage.label || 'image').replace(/[^a-zA-Z0-9_-]/g, '_')}.jpg`)} className="px-3 py-2 bg-[rgba(138,21,56,0.85)] text-white rounded-xl text-xs font-black uppercase">Download</button>
-                <button onClick={() => setFullViewImage(null)} className="px-3 py-2 bg-gray-100 text-gray-700 rounded-xl text-xs font-black uppercase">Close</button>
-              </div>
+            );
+          }
+
+          return (
+            <div className="relative min-h-[65vh] rounded-2xl overflow-hidden border bg-white flex items-center justify-center">
+              <img src={url} alt={`${typeLabel} full compare ${safeIndex + 1}`} className="max-w-full max-h-[72vh] object-contain" />
+              <span className={`absolute left-4 top-4 px-3 py-1.5 rounded-xl text-[11px] font-black uppercase border ${typeLabel === 'RAW' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-[rgba(138,21,56,0.06)] text-[#8a1538] border-[rgba(138,21,56,0.18)]'}`}>
+                {typeLabel} #{safeIndex + 1}
+              </span>
+              <button
+                type="button"
+                onClick={() => handleDownloadSingleAsset(url, `${cleanSku}_${typeLabel.toLowerCase()}_${safeIndex + 1}.jpg`)}
+                className="absolute right-4 top-4 px-3 py-1.5 bg-white/90 hover:bg-white text-gray-800 border border-gray-200 rounded-xl text-[10px] font-black uppercase shadow-sm"
+              >
+                Download
+              </button>
             </div>
-            <div className="p-4 overflow-auto bg-[rgba(138,21,56,1)] flex items-center justify-center">
-              <img src={fullViewImage.url} alt={fullViewImage.label || 'Full image'} className="max-w-full max-h-[78vh] object-contain rounded-lg" />
+          );
+        };
+
+        return (
+          <div className="fixed inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 z-[110]">
+            <div className="bg-white rounded-2xl w-full max-w-[96vw] max-h-[96vh] overflow-hidden shadow-2xl flex flex-col">
+              <div className="p-4 border-b flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-black text-gray-900 uppercase">Full Screen Compare • {managerPreview.product_name}</h3>
+                  <p className="text-[10px] font-bold text-gray-400">
+                    SKU: {managerPreview.sku || 'UNKNOWN'} • Pair {safeIndex + 1} of {pairCount} • Use ← / → keys or side buttons
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {pairCount > 1 && (
+                    <>
+                      <button onClick={() => moveComparePair(-1)} className="px-3 py-2 bg-gray-100 text-gray-700 rounded-xl text-xs font-black uppercase">← Previous Pair</button>
+                      <button onClick={() => moveComparePair(1)} className="px-3 py-2 bg-gray-100 text-gray-700 rounded-xl text-xs font-black uppercase">Next Pair →</button>
+                    </>
+                  )}
+                  <button onClick={() => setFullCompareIndex(null)} className="px-3 py-2 bg-[rgba(138,21,56,0.85)] text-white rounded-xl text-xs font-black uppercase">Close Compare</button>
+                </div>
+              </div>
+
+              <div className="relative p-4 overflow-auto bg-gray-100">
+                {pairCount > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => moveComparePair(-1)}
+                    className="absolute left-6 top-1/2 -translate-y-1/2 z-10 w-12 h-12 rounded-full bg-white/95 hover:bg-white text-gray-900 text-3xl font-black shadow-lg flex items-center justify-center"
+                    title="Previous pair"
+                  >
+                    ‹
+                  </button>
+                )}
+
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-wider text-amber-700 mb-2">RAW Image {safeIndex + 1}</div>
+                    {renderLargeCompareImage(rawUrl, 'RAW')}
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-wider text-[#8a1538] mb-2">EDITED Image {safeIndex + 1}</div>
+                    {renderLargeCompareImage(editedUrl, 'EDITED')}
+                  </div>
+                </div>
+
+                {pairCount > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => moveComparePair(1)}
+                    className="absolute right-6 top-1/2 -translate-y-1/2 z-10 w-12 h-12 rounded-full bg-white/95 hover:bg-white text-gray-900 text-3xl font-black shadow-lg flex items-center justify-center"
+                    title="Next pair"
+                  >
+                    ›
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
+
+      {/* FULL IMAGE VIEWER MODAL */}
+      {fullViewImage && (() => {
+        const gallery = Array.isArray(fullViewImage.images) ? fullViewImage.images : [];
+        const hasGalleryNavigation = gallery.length > 1;
+        const currentGalleryIndex = Number.isInteger(fullViewImage.index) ? fullViewImage.index : gallery.findIndex(item => item.url === fullViewImage.url);
+        const displayIndex = currentGalleryIndex >= 0 ? currentGalleryIndex + 1 : 1;
+        return (
+          <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 z-[100]">
+            <div className="bg-white rounded-2xl w-full max-w-7xl max-h-[95vh] overflow-hidden shadow-2xl flex flex-col">
+              <div className="p-4 border-b flex items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-sm font-black text-gray-900 uppercase">{fullViewImage.label}</h3>
+                  <p className="text-[10px] font-bold text-gray-400">
+                    SKU: {fullViewImage.sku || 'UNKNOWN'}
+                    {hasGalleryNavigation ? ` • Image ${displayIndex} of ${gallery.length}` : ''}
+                  </p>
+                  {hasGalleryNavigation && (
+                    <p className="text-[10px] font-bold text-gray-400 mt-0.5">Use keyboard ← / → or the side buttons to move between images.</p>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  {hasGalleryNavigation && (
+                    <>
+                      <button onClick={() => moveFullViewImage(-1)} className="px-3 py-2 bg-gray-100 text-gray-700 rounded-xl text-xs font-black uppercase">← Prev</button>
+                      <button onClick={() => moveFullViewImage(1)} className="px-3 py-2 bg-gray-100 text-gray-700 rounded-xl text-xs font-black uppercase">Next →</button>
+                    </>
+                  )}
+                  <button onClick={() => handleDownloadSingleAsset(fullViewImage.url, `${String(fullViewImage.sku || 'image').replace(/[^a-zA-Z0-9_-]/g, '_')}_${String(fullViewImage.label || 'image').replace(/[^a-zA-Z0-9_-]/g, '_')}.jpg`)} className="px-3 py-2 bg-[rgba(138,21,56,0.85)] text-white rounded-xl text-xs font-black uppercase">Download</button>
+                  <button onClick={() => setFullViewImage(null)} className="px-3 py-2 bg-gray-100 text-gray-700 rounded-xl text-xs font-black uppercase">Close</button>
+                </div>
+              </div>
+              <div className="relative p-4 overflow-auto bg-[rgba(138,21,56,1)] flex items-center justify-center min-h-[70vh]">
+                {hasGalleryNavigation && (
+                  <button
+                    type="button"
+                    onClick={() => moveFullViewImage(-1)}
+                    className="absolute left-4 top-1/2 -translate-y-1/2 z-10 w-12 h-12 rounded-full bg-white/90 hover:bg-white text-gray-900 text-3xl font-black shadow-lg flex items-center justify-center"
+                    title="Previous image"
+                  >
+                    ‹
+                  </button>
+                )}
+                <img src={fullViewImage.url} alt={fullViewImage.label || 'Full image'} className="max-w-full max-h-[78vh] object-contain rounded-lg" />
+                {hasGalleryNavigation && (
+                  <button
+                    type="button"
+                    onClick={() => moveFullViewImage(1)}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 z-10 w-12 h-12 rounded-full bg-white/90 hover:bg-white text-gray-900 text-3xl font-black shadow-lg flex items-center justify-center"
+                    title="Next image"
+                  >
+                    ›
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
 
     </div>
   );

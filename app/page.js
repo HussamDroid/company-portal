@@ -9,6 +9,130 @@ import JSZip from 'jszip';
 // Primary accent uses rgba(138, 21, 56, 0.85) with white surfaces.
 // Semantic status colors are still used where helpful.
 
+
+const PORTAL_PERMISSION_FEATURES = [
+  { key: 'dashboard', label: 'Dashboard Access', category: 'Core Portal' },
+  { key: 'stores_manage', label: 'Create/Edit/Delete Stores', category: 'Stores & Catalog' },
+  { key: 'excel_upload', label: 'Upload Excel Sheets', category: 'Stores & Catalog' },
+  { key: 'product_edit', label: 'Edit Product Details', category: 'Stores & Catalog' },
+  { key: 'ad_hoc', label: 'Add Ad-Hoc Products', category: 'Stores & Catalog' },
+  { key: 'bulk_images', label: 'Bulk Image Upload', category: 'Media & Assets' },
+  { key: 'product_images', label: 'Product Image Upload', category: 'Media & Assets' },
+  { key: 'asset_downloads', label: 'SKU Asset Downloads', category: 'Media & Assets' },
+  { key: 'selected_downloads', label: 'Selected Asset Downloads', category: 'Media & Assets' },
+  { key: 'claim_status', label: 'Claim / Change Status', category: 'Product Workflow' },
+  { key: 'submit_review', label: 'Submit Under Review', category: 'Product Workflow' },
+  { key: 'review_images', label: 'Review Modal', category: 'Product Workflow' },
+  { key: 'compare_images', label: 'Compare RAW/EDITED', category: 'Product Workflow' },
+  { key: 'reject', label: 'Reject Products', category: 'Product Workflow' },
+  { key: 'approve', label: 'Ready To Upload Approval', category: 'Product Workflow' },
+  { key: 'status_override', label: 'Status Override', category: 'Product Workflow' },
+  { key: 'remove_edited', label: 'Remove Edited Images', category: 'Product Workflow' },
+  { key: 'sheet_exports', label: 'Original / Live Sheet Exports', category: 'Sheets & Exports' },
+  { key: 'tasks_view', label: 'View Tasks', category: 'Tasks & Messaging' },
+  { key: 'tasks_reply', label: 'Reply To Tasks', category: 'Tasks & Messaging' },
+  { key: 'tasks_manage', label: 'Post/Edit/Delete Tasks', category: 'Tasks & Messaging' },
+  { key: 'staff_register', label: 'Register / Edit Staff', category: 'Team & Admin' },
+  { key: 'google_view', label: 'Open Google Sheets', category: 'Shared Links' },
+  { key: 'google_manage', label: 'Manage Google Sheet Link', category: 'Shared Links' },
+  { key: 'performance', label: 'Performance View', category: 'Team & Admin' }
+];
+
+const createPortalPermissionSet = (defaultValue = false) =>
+  PORTAL_PERMISSION_FEATURES.reduce((acc, feature) => {
+    acc[feature.key] = defaultValue;
+    return acc;
+  }, {});
+
+const createEmptyRoleForm = () => ({
+  roleName: '',
+  permissions: createPortalPermissionSet(false)
+});
+
+const LEGACY_PERMISSION_GROUPS = {
+  canUploadAssets: ['bulk_images', 'product_images', 'asset_downloads', 'selected_downloads'],
+  canModifyDataSheets: ['excel_upload', 'product_edit', 'sheet_exports', 'ad_hoc'],
+  canReviewArrays: ['review_images', 'compare_images', 'reject', 'approve'],
+  canSuperviseStaff: ['stores_manage', 'tasks_manage', 'staff_register', 'google_manage', 'status_override', 'performance']
+};
+
+const CORE_ROLE_PERMISSION_KEYS = {
+  Operator: [
+    'dashboard', 'product_images', 'claim_status', 'submit_review', 'remove_edited',
+    'asset_downloads', 'selected_downloads', 'tasks_view', 'tasks_reply', 'google_view', 'performance'
+  ],
+  Photographer: ['dashboard', 'bulk_images', 'asset_downloads', 'selected_downloads', 'tasks_view', 'tasks_reply', 'google_view'],
+  'Content Editor': ['dashboard', 'excel_upload', 'product_edit', 'sheet_exports', 'ad_hoc', 'tasks_view', 'tasks_reply', 'google_view']
+};
+
+const ACTION_PERMISSION_ALIASES = {
+  view_workspace: ['dashboard'],
+  upload_assets: ['bulk_images', 'product_images', 'asset_downloads', 'selected_downloads'],
+  modify_sheets: ['excel_upload', 'product_edit', 'sheet_exports', 'ad_hoc'],
+  review_arrays: ['review_images', 'compare_images', 'reject', 'approve'],
+  supervise_staff: ['stores_manage', 'tasks_manage', 'staff_register', 'google_manage', 'status_override', 'performance']
+};
+
+const hasOwnPermissionKey = (permissions, key) => Object.prototype.hasOwnProperty.call(permissions || {}, key);
+
+const roleHasGranularPermissions = (permissions = {}) =>
+  PORTAL_PERMISSION_FEATURES.some(feature => hasOwnPermissionKey(permissions, feature.key));
+
+const normalizeRolePermissions = (permissions = {}) => {
+  const normalized = createPortalPermissionSet(false);
+  PORTAL_PERMISSION_FEATURES.forEach(feature => {
+    if (hasOwnPermissionKey(permissions, feature.key)) {
+      normalized[feature.key] = Boolean(permissions[feature.key]);
+    }
+  });
+  return normalized;
+};
+
+const expandLegacyPermissions = (permissions = {}) => {
+  const expanded = createPortalPermissionSet(false);
+
+  Object.entries(LEGACY_PERMISSION_GROUPS).forEach(([legacyKey, featureKeys]) => {
+    if (permissions?.[legacyKey]) {
+      featureKeys.forEach(featureKey => {
+        expanded[featureKey] = true;
+      });
+    }
+  });
+
+  // Old custom groups were always given these basic read permissions by the matrix.
+  expanded.dashboard = true;
+  expanded.tasks_view = true;
+  expanded.tasks_reply = true;
+  expanded.google_view = true;
+
+  return expanded;
+};
+
+const roleAllowsPortalFeature = (roleName, customRoles = [], featureKey) => {
+  if (!featureKey) return false;
+  if (roleName === 'Admin' || roleName === 'Manager') return true;
+
+  const coreFeatures = CORE_ROLE_PERMISSION_KEYS[roleName];
+  if (coreFeatures) return coreFeatures.includes(featureKey);
+
+  const customRole = customRoles.find(role => String(role.roleName || '').toLowerCase() === String(roleName || '').toLowerCase());
+  if (!customRole) return false;
+
+  const permissions = customRole.permissions || {};
+  const resolvedPermissions = roleHasGranularPermissions(permissions)
+    ? normalizeRolePermissions(permissions)
+    : expandLegacyPermissions(permissions);
+
+  return Boolean(resolvedPermissions[featureKey]);
+};
+
+const getLegacyFlagsFromFeaturePermissions = (permissions = {}) => ({
+  canUploadAssets: LEGACY_PERMISSION_GROUPS.canUploadAssets.some(featureKey => Boolean(permissions[featureKey])),
+  canModifyDataSheets: LEGACY_PERMISSION_GROUPS.canModifyDataSheets.some(featureKey => Boolean(permissions[featureKey])),
+  canReviewArrays: LEGACY_PERMISSION_GROUPS.canReviewArrays.some(featureKey => Boolean(permissions[featureKey])),
+  canSuperviseStaff: LEGACY_PERMISSION_GROUPS.canSuperviseStaff.some(featureKey => Boolean(permissions[featureKey]))
+});
+
 export default function IntegratedOperationsPortal() {
   // --- AUTHENTICATION STATES ---
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -31,13 +155,7 @@ export default function IntegratedOperationsPortal() {
     }
   ]);
   const [showRoleModal, setShowRoleModal] = useState(false);
-  const [newRoleForm, setNewRoleForm] = useState({
-    roleName: '',
-    canUploadAssets: false,
-    canModifyDataSheets: false,
-    canReviewArrays: false,
-    canSuperviseStaff: false
-  });
+  const [newRoleForm, setNewRoleForm] = useState(() => createEmptyRoleForm());
 
   // --- INTEGRATED NEW STAFF REGISTRATION FORM STATES ---
   const [regFullName, setRegFullName] = useState('');
@@ -64,6 +182,10 @@ export default function IntegratedOperationsPortal() {
   const [showStoreCreate, setShowStoreCreate] = useState(false);
   const [newStoreName, setNewStoreName] = useState('');
   const [storeImageUploadingId, setStoreImageUploadingId] = useState(null);
+  const [storeImageRemovingId, setStoreImageRemovingId] = useState(null);
+  const [editingStore, setEditingStore] = useState(null);
+  const [storeEditForm, setStoreEditForm] = useState({ name: '' });
+  const [storeEditSaving, setStoreEditSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [imageUploadingProductId, setImageUploadingProductId] = useState(null);
@@ -74,6 +196,15 @@ export default function IntegratedOperationsPortal() {
   const [taskSaving, setTaskSaving] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState(null);
   const [taskError, setTaskError] = useState(null);
+  const [taskReplies, setTaskReplies] = useState([]);
+  const [taskReplyDrafts, setTaskReplyDrafts] = useState({});
+  const [taskReplySavingId, setTaskReplySavingId] = useState(null);
+  const [taskReplyError, setTaskReplyError] = useState(null);
+  const [expandedTaskReplyIds, setExpandedTaskReplyIds] = useState({});
+  const [taskSearchQuery, setTaskSearchQuery] = useState('');
+  const [taskStatusFilter, setTaskStatusFilter] = useState('All');
+  const [taskPriorityFilter, setTaskPriorityFilter] = useState('All');
+  const [taskTargetFilter, setTaskTargetFilter] = useState('All');
   const [taskForm, setTaskForm] = useState({
     title: '',
     description: '',
@@ -138,16 +269,9 @@ export default function IntegratedOperationsPortal() {
   // --- SYSTEM PERMISSION RESOLUTION UTILITY ---
   const checkPermission = (action) => {
     if (authRole === 'Admin' || authRole === 'Manager') return true;
-    if (authRole === 'Operator' && action === 'view_workspace') return true;
-    
-    const targetRole = customRoles.find(r => r.roleName.toLowerCase() === authRole.toLowerCase());
-    if (!targetRole) return false;
-    
-    if (action === 'upload_assets') return targetRole.permissions.canUploadAssets;
-    if (action === 'modify_sheets') return targetRole.permissions.canModifyDataSheets;
-    if (action === 'review_arrays') return targetRole.permissions.canReviewArrays;
-    if (action === 'supervise_staff') return targetRole.permissions.canSuperviseStaff;
-    return false;
+
+    const featureKeys = ACTION_PERMISSION_ALIASES[action] || [action];
+    return featureKeys.some(featureKey => roleAllowsPortalFeature(authRole, customRoles, featureKey));
   };
 
   // --- SESSION PERSISTENCE ---
@@ -232,7 +356,7 @@ export default function IntegratedOperationsPortal() {
 
   // --- DATABASE DATA SYNCHRONIZERS ---
   async function fetchProducts() {
-    const [prodsRes, historyRes, usersRes, tasksRes, storesRes, settingsRes] = await Promise.all([
+    const [prodsRes, historyRes, usersRes, tasksRes, taskRepliesRes, storesRes, settingsRes] = await Promise.all([
       supabase
         .from('products')
         .select('*')
@@ -248,6 +372,10 @@ export default function IntegratedOperationsPortal() {
         .from('task_board')
         .select('*')
         .order('created_at', { ascending: false }),
+      supabase
+        .from('task_replies')
+        .select('*')
+        .order('created_at', { ascending: true }),
       supabase
         .from('stores')
         .select('*')
@@ -292,6 +420,15 @@ export default function IntegratedOperationsPortal() {
       setTasks([]);
     }
 
+    if (!taskRepliesRes.error) {
+      setTaskReplies(taskRepliesRes.data || []);
+      setTaskReplyError(null);
+    } else {
+      console.warn('task_replies fetch failed. Check task_replies permissions or SQL setup:', taskRepliesRes.error);
+      setTaskReplyError(taskRepliesRes.error.message || 'Task replies table is not ready.');
+      setTaskReplies([]);
+    }
+
     if (!storesRes.error) {
       setStores(storesRes.data || []);
     } else {
@@ -329,6 +466,38 @@ export default function IntegratedOperationsPortal() {
   const getStoreNameById = (storeId) => {
     if (!storeId) return 'Unassigned Store';
     return stores.find(store => Number(store.id) === Number(storeId))?.name || `Store #${storeId}`;
+  };
+
+  const sortStoresByName = (storeRows = []) =>
+    [...storeRows].sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+
+  const applyStorePatchLocally = (storeId, patch) => {
+    if (!storeId || !patch) return;
+
+    setStores(prev => {
+      const exists = prev.some(store => Number(store.id) === Number(storeId));
+      const nextStores = exists
+        ? prev.map(store => Number(store.id) === Number(storeId) ? { ...store, ...patch } : store)
+        : [...prev, patch];
+      return sortStoresByName(nextStores);
+    });
+
+    setEditingStore(prev =>
+      prev && Number(prev.id) === Number(storeId) ? { ...prev, ...patch } : prev
+    );
+  };
+
+  const openStoreEditModal = (store) => {
+    if (!(authRole === 'Admin' || authRole === 'Manager') || !store?.id) return;
+
+    const latestStore = stores.find(item => Number(item.id) === Number(store.id)) || store;
+    setEditingStore(latestStore);
+    setStoreEditForm({ name: latestStore.name || '' });
+  };
+
+  const closeStoreEditModal = () => {
+    setEditingStore(null);
+    setStoreEditForm({ name: '' });
   };
 
   const isStoreScoped = selectedStoreId !== 'ALL';
@@ -426,7 +595,7 @@ export default function IntegratedOperationsPortal() {
 
       setStores(prev => {
         const merged = [data, ...prev.filter(store => Number(store.id) !== Number(data.id))];
-        return merged.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+        return sortStoresByName(merged);
       });
       setSelectedStoreId(data.id);
       setNewStoreName('');
@@ -434,6 +603,85 @@ export default function IntegratedOperationsPortal() {
       setActiveTab('home');
     } catch (err) {
       alert('Store creation failed: ' + (err.message || 'Unknown error'));
+    }
+  };
+
+  const handleUpdateStoreName = async (e) => {
+    e.preventDefault();
+    if (!(authRole === 'Admin' || authRole === 'Manager')) return;
+    if (!editingStore?.id) return;
+
+    const cleanName = storeEditForm.name.trim();
+    if (!cleanName) {
+      alert('Store name is required.');
+      return;
+    }
+
+    setStoreEditSaving(true);
+    try {
+      const { data, error } = await supabase
+        .from('stores')
+        .update({ name: cleanName })
+        .eq('id', editingStore.id)
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      const updatedStore = data || { ...editingStore, name: cleanName };
+      applyStorePatchLocally(editingStore.id, updatedStore);
+      setEditingStore(updatedStore);
+      setStoreEditForm({ name: updatedStore.name || cleanName });
+      alert('Store name updated successfully.');
+    } catch (err) {
+      alert('Store name update failed: ' + (err.message || 'Unknown error'));
+    } finally {
+      setStoreEditSaving(false);
+    }
+  };
+
+  const handleRemoveStoreImage = async (storeId) => {
+    if (!(authRole === 'Admin' || authRole === 'Manager')) return;
+    if (!storeId) return;
+
+    const targetStore = stores.find(store => Number(store.id) === Number(storeId)) || editingStore;
+    const previousImageUrl = targetStore?.image_url || '';
+
+    if (!previousImageUrl) {
+      alert('This store does not currently have an image to remove.');
+      return;
+    }
+
+    if (!window.confirm(`Remove the image from store "${targetStore?.name || 'this store'}"?`)) return;
+
+    setStoreImageRemovingId(storeId);
+    try {
+      const { data, error } = await supabase
+        .from('stores')
+        .update({ image_url: null })
+        .eq('id', storeId)
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      const updatedStore = data || { ...targetStore, image_url: null };
+      applyStorePatchLocally(storeId, updatedStore);
+
+      const storagePath = extractStoragePathFromPublicUrl(previousImageUrl);
+      if (storagePath) {
+        const { error: storageError } = await supabase.storage
+          .from('product-assets')
+          .remove([storagePath]);
+
+        if (storageError) {
+          console.warn('Store image was removed from the store record, but storage file deletion failed:', storageError);
+        }
+      }
+    } catch (err) {
+      alert('Store image removal failed: ' + (err.message || 'Unknown error'));
+    } finally {
+      setStoreImageRemovingId(null);
     }
   };
 
@@ -446,6 +694,9 @@ export default function IntegratedOperationsPortal() {
       e.target.value = null;
       return;
     }
+
+    const previousStore = stores.find(store => Number(store.id) === Number(storeId)) || editingStore;
+    const previousImageUrl = previousStore?.image_url || '';
 
     setStoreImageUploadingId(storeId);
 
@@ -477,11 +728,20 @@ export default function IntegratedOperationsPortal() {
 
       if (updateError) throw updateError;
 
-      setStores(prev =>
-        prev
-          .map(store => Number(store.id) === Number(storeId) ? updatedStore : store)
-          .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
-      );
+      applyStorePatchLocally(storeId, updatedStore);
+
+      if (previousImageUrl && previousImageUrl !== imageUrl) {
+        const previousStoragePath = extractStoragePathFromPublicUrl(previousImageUrl);
+        if (previousStoragePath) {
+          const { error: storageCleanupError } = await supabase.storage
+            .from('product-assets')
+            .remove([previousStoragePath]);
+
+          if (storageCleanupError) {
+            console.warn('Store image was replaced, but old storage file cleanup failed:', storageCleanupError);
+          }
+        }
+      }
     } catch (err) {
       alert('Store image upload failed: ' + (err.message || 'Unknown error'));
     } finally {
@@ -537,6 +797,7 @@ export default function IntegratedOperationsPortal() {
       setStores(prev => prev.filter(store => Number(store.id) !== Number(storeId)));
       setProducts(prev => prev.filter(product => Number(product.store_id || 0) !== Number(storeId)));
       setManifestHistory(prev => prev.filter(history => Number(history.store_id || 0) !== Number(storeId)));
+      setEditingStore(prev => prev && Number(prev.id) === Number(storeId) ? null : prev);
 
       if (Number(selectedStoreId) === Number(storeId)) {
         setSelectedStoreId('ALL');
@@ -835,6 +1096,26 @@ export default function IntegratedOperationsPortal() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_board' }, () => {
         fetchProducts();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'task_replies' }, (payload) => {
+        if (payload.eventType === 'DELETE') {
+          const deletedReplyId = payload.old?.id;
+          if (deletedReplyId) {
+            setTaskReplies(prev => prev.filter(reply => reply.id !== deletedReplyId));
+          }
+          return;
+        }
+
+        if (payload.new?.id) {
+          setTaskReplies(prev => {
+            const exists = prev.some(reply => reply.id === payload.new.id);
+            const nextReplies = exists
+              ? prev.map(reply => reply.id === payload.new.id ? payload.new : reply)
+              : [...prev, payload.new];
+
+            return nextReplies.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+          });
+        }
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'stores' }, () => {
         fetchProducts();
       })
@@ -957,7 +1238,7 @@ export default function IntegratedOperationsPortal() {
           return;
         }
 
-        const isContentEditorSync = authRole === 'Content Editor' || (authRole !== 'Admin' && authRole !== 'Manager' && checkPermission('modify_sheets'));
+        const isContentEditorSync = authRole === 'Content Editor' || (authRole !== 'Admin' && authRole !== 'Manager' && checkPermission('excel_upload'));
 
         if (isContentEditorSync) {
           if (products.length === 0) {
@@ -1642,29 +1923,29 @@ export default function IntegratedOperationsPortal() {
   // --- CUSTOM SECURITY ROLE CONFIGURATIONS ---
   const handleCreateCustomRole = (e) => {
     e.preventDefault();
-    if (!newRoleForm.roleName.trim()) return;
+
+    const cleanRoleName = newRoleForm.roleName.trim();
+    if (!cleanRoleName) return;
+
+    const selectedPermissions = normalizeRolePermissions(newRoleForm.permissions || {});
+    const legacyFlags = getLegacyFlagsFromFeaturePermissions(selectedPermissions);
 
     const formattedRole = {
-      roleName: newRoleForm.roleName.trim(),
+      roleName: cleanRoleName,
       permissions: {
-        canUploadAssets: newRoleForm.canUploadAssets,
-        canModifyDataSheets: newRoleForm.canModifyDataSheets,
-        canReviewArrays: newRoleForm.canReviewArrays,
-        canSuperviseStaff: newRoleForm.canSuperviseStaff
+        ...selectedPermissions,
+        ...legacyFlags
       }
     };
 
-    const updatedRolesList = [...customRoles, formattedRole];
+    const updatedRolesList = [
+      ...customRoles.filter(role => String(role.roleName || '').toLowerCase() !== cleanRoleName.toLowerCase()),
+      formattedRole
+    ];
+
     setCustomRoles(updatedRolesList);
     localStorage.setItem('blackrose_custom_roles', JSON.stringify(updatedRolesList));
-    
-    setNewRoleForm({
-      roleName: '',
-      canUploadAssets: false,
-      canModifyDataSheets: false,
-      canReviewArrays: false,
-      canSuperviseStaff: false
-    });
+    setNewRoleForm(createEmptyRoleForm());
     setShowRoleModal(false);
     alert(`Custom permission group "${formattedRole.roleName}" deployed.`);
   };
@@ -2581,16 +2862,59 @@ export default function IntegratedOperationsPortal() {
   };
 
   // --- TASK BOARD MANAGEMENT METHODS ---
-  const isTaskManager = authRole === 'Admin' || authRole === 'Manager' || checkPermission('supervise_staff');
+  const isTaskManager = authRole === 'Admin' || authRole === 'Manager' || checkPermission('tasks_manage');
+  const canViewTasks = isTaskManager || checkPermission('tasks_view');
+  const canReplyToTasks = isTaskManager || checkPermission('tasks_reply');
 
+  // Staff only see tasks meant for them. Managers/Admins/supervisors see every task so
+  // specific employee assignments do not disappear from the manager portal.
   const normalizeTaskTarget = (value) => String(value || 'All').trim().toLowerCase();
 
-  const visibleTasks = tasks.filter(task => {
+  const isTaskVisibleToCurrentUser = (task) => {
+    if (!canViewTasks) return false;
+    if (isTaskManager) return true;
+
     const target = normalizeTaskTarget(task.assigned_role);
     if (target === 'all') return true;
     if (target === normalizeTaskTarget(authRole)) return true;
     if (target === normalizeTaskTarget(loginUser)) return true;
+    if (target === normalizeTaskTarget(loginDisplayName)) return true;
     return false;
+  };
+
+  const visibleTasks = tasks.filter(isTaskVisibleToCurrentUser);
+
+  const taskStatusFilterOptions = ['All', 'Open', 'In Progress', 'Done', 'Archived'];
+  const taskPriorityFilterOptions = ['All', 'Urgent', 'High', 'Normal', 'Low'];
+  const taskTargetFilterOptions = Array.from(new Set([
+    'All',
+    'Operator',
+    'Photographer',
+    'Content Editor',
+    'Manager',
+    'Admin',
+    ...tasks.map(task => task.assigned_role || 'All'),
+    ...userRegistry.map(user => user.username).filter(Boolean)
+  ])).filter(Boolean);
+
+  const filteredVisibleTasks = visibleTasks.filter(task => {
+    const normalizedTaskTarget = normalizeTaskTarget(task.assigned_role || 'All');
+    const searchLower = taskSearchQuery.toLowerCase().trim();
+
+    const matchesStatus = taskStatusFilter === 'All' || (task.status || 'Open') === taskStatusFilter;
+    const matchesPriority = taskPriorityFilter === 'All' || (task.priority || 'Normal') === taskPriorityFilter;
+    const matchesTarget = taskTargetFilter === 'All' || normalizedTaskTarget === normalizeTaskTarget(taskTargetFilter);
+    const matchesSearch = searchLower === '' || [
+      task.title,
+      task.description,
+      task.created_by,
+      task.updated_by,
+      task.assigned_role,
+      task.priority,
+      task.status
+    ].some(value => String(value || '').toLowerCase().includes(searchLower));
+
+    return matchesStatus && matchesPriority && matchesTarget && matchesSearch;
   });
 
   const openTaskCount = visibleTasks.filter(task => task.status !== 'Done' && task.status !== 'Archived').length;
@@ -2671,12 +2995,30 @@ export default function IntegratedOperationsPortal() {
 
   const handleDeleteTask = async (taskId) => {
     if (!isTaskManager) return;
-    if (!window.confirm('Delete this task permanently?')) return;
+    if (!window.confirm('Delete this task permanently? This will also remove all replies attached to it.')) return;
 
     try {
+      const { error: repliesDeleteError } = await supabase
+        .from('task_replies')
+        .delete()
+        .eq('task_id', taskId);
+
+      if (repliesDeleteError) throw repliesDeleteError;
+
       const { error } = await supabase.from('task_board').delete().eq('id', taskId);
       if (error) throw error;
       setTasks(prev => prev.filter(task => task.id !== taskId));
+      setTaskReplies(prev => prev.filter(reply => reply.task_id !== taskId));
+      setTaskReplyDrafts(prev => {
+        const nextDrafts = { ...prev };
+        delete nextDrafts[taskId];
+        return nextDrafts;
+      });
+      setExpandedTaskReplyIds(prev => {
+        const nextExpanded = { ...prev };
+        delete nextExpanded[taskId];
+        return nextExpanded;
+      });
       if (editingTaskId === taskId) resetTaskForm();
     } catch (err) {
       alert('Task delete failed: ' + (err.message || 'Unknown error'));
@@ -2698,6 +3040,169 @@ export default function IntegratedOperationsPortal() {
       if (data) setTasks(prev => prev.map(task => task.id === data.id ? data : task));
     } catch (err) {
       alert('Task status update failed: ' + (err.message || 'Unknown error'));
+    }
+  };
+
+  const createClientUuid = () => {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      return crypto.randomUUID();
+    }
+
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+      const rand = Math.floor(Math.random() * 16);
+      const value = char === 'x' ? rand : (rand & 0x3) | 0x8;
+      return value.toString(16);
+    });
+  };
+
+  const isUuidString = (value) => {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
+  };
+
+  const getCurrentUserRegistryUuid = () => {
+    const matchedUser = userRegistry.find(user =>
+      normalizeTaskTarget(user.username) === normalizeTaskTarget(loginUser) ||
+      normalizeTaskTarget(user.full_name) === normalizeTaskTarget(loginDisplayName)
+    );
+
+    return isUuidString(matchedUser?.id) ? matchedUser.id : null;
+  };
+
+  const getTaskRepliesForTask = (taskId) => {
+    return taskReplies
+      .filter(reply => reply.task_id === taskId)
+      .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+  };
+
+  const getTaskReplyCount = (taskId) => getTaskRepliesForTask(taskId).length;
+
+  const setTaskReplyDraft = (taskId, value) => {
+    setTaskReplyDrafts(prev => ({ ...prev, [taskId]: value }));
+  };
+
+  const toggleTaskReplies = (taskId) => {
+    setExpandedTaskReplyIds(prev => ({ ...prev, [taskId]: !(prev[taskId] ?? true) }));
+  };
+
+  const upsertTaskReplyLocally = (replyRow) => {
+    if (!replyRow?.id) return;
+
+    setTaskReplies(prev => {
+      const exists = prev.some(reply => reply.id === replyRow.id);
+      const nextReplies = exists
+        ? prev.map(reply => reply.id === replyRow.id ? replyRow : reply)
+        : [...prev, replyRow];
+
+      return nextReplies.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+    });
+  };
+
+  const handleTaskReplySubmit = async (taskId) => {
+    if (!taskId) return;
+
+    if (!canReplyToTasks) {
+      alert('You do not have permission to reply to tasks.');
+      return;
+    }
+
+    const cleanMessage = String(taskReplyDrafts[taskId] || '').trim();
+    if (!cleanMessage) return;
+
+    setTaskReplySavingId(taskId);
+    try {
+      const nowIso = new Date().toISOString();
+      const payload = {
+        id: createClientUuid(),
+        task_id: taskId,
+        user_name: loginDisplayName || loginUser || 'System User',
+        user_id: getCurrentUserRegistryUuid(),
+        message: cleanMessage,
+        created_at: nowIso
+      };
+
+      const { data, error } = await supabase
+        .from('task_replies')
+        .insert([payload])
+        .select('*')
+        .single();
+
+      if (error) throw error;
+
+      upsertTaskReplyLocally(data || payload);
+      setTaskReplyDrafts(prev => ({ ...prev, [taskId]: '' }));
+      setExpandedTaskReplyIds(prev => ({ ...prev, [taskId]: true }));
+      setTaskReplyError(null);
+    } catch (err) {
+      alert('Reply send failed: ' + (err.message || 'Unknown error'));
+      setTaskReplyError(err.message || 'Reply send failed.');
+    } finally {
+      setTaskReplySavingId(null);
+    }
+  };
+
+  const TASK_REPLY_DELETE_WINDOW_MINUTES = 15;
+  const TASK_REPLY_DELETE_WINDOW_MS = TASK_REPLY_DELETE_WINDOW_MINUTES * 60 * 1000;
+
+  const isOwnTaskReply = (reply) => {
+    const replyName = normalizeTaskTarget(reply?.user_name);
+    return replyName === normalizeTaskTarget(loginUser) || replyName === normalizeTaskTarget(loginDisplayName);
+  };
+
+  const getTaskReplyDeleteInfo = (reply, forceNowMs = null) => {
+    const createdAtMs = new Date(reply?.created_at || '').getTime();
+    const hasValidCreatedAt = !Number.isNaN(createdAtMs);
+    const nowMs = typeof forceNowMs === 'number'
+      ? forceNowMs
+      : dashboardClock instanceof Date
+        ? dashboardClock.getTime()
+        : Date.now();
+
+    const ageMs = hasValidCreatedAt ? Math.max(0, nowMs - createdAtMs) : TASK_REPLY_DELETE_WINDOW_MS + 1;
+    const isExpired = !hasValidCreatedAt || ageMs > TASK_REPLY_DELETE_WINDOW_MS;
+    const isOwnReplyMessage = isOwnTaskReply(reply);
+
+    // Replies can only be deleted during this time window. Change
+    // TASK_REPLY_DELETE_WINDOW_MINUTES above if you want 5, 10, 30, etc. minutes instead.
+    const canDelete = (isTaskManager || isOwnReplyMessage) && !isExpired;
+    const remainingMs = hasValidCreatedAt ? Math.max(0, TASK_REPLY_DELETE_WINDOW_MS - ageMs) : 0;
+    const remainingMinutes = Math.max(0, Math.ceil(remainingMs / 60000));
+    const deleteUntilLabel = hasValidCreatedAt
+      ? new Date(createdAtMs + TASK_REPLY_DELETE_WINDOW_MS).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : 'the delete window';
+
+    return {
+      canDelete,
+      isExpired,
+      isOwnReplyMessage,
+      remainingMinutes,
+      deleteUntilLabel,
+      reason: isExpired
+        ? `Delete window expired. Replies can only be deleted for ${TASK_REPLY_DELETE_WINDOW_MINUTES} minutes after posting.`
+        : 'Only the sender or an authorized manager can delete this reply during the delete window.'
+    };
+  };
+
+  const handleDeleteTaskReply = async (reply) => {
+    if (!reply?.id) return;
+
+    const deleteInfo = getTaskReplyDeleteInfo(reply, Date.now());
+    if (!deleteInfo.canDelete) {
+      alert(deleteInfo.reason);
+      return;
+    }
+
+    if (!window.confirm('Delete this reply?')) return;
+
+    try {
+      const { error } = await supabase
+        .from('task_replies')
+        .delete()
+        .eq('id', reply.id);
+
+      if (error) throw error;
+      setTaskReplies(prev => prev.filter(existingReply => existingReply.id !== reply.id));
+    } catch (err) {
+      alert('Reply delete failed: ' + (err.message || 'Unknown error'));
     }
   };
 
@@ -2738,7 +3243,7 @@ export default function IntegratedOperationsPortal() {
     const matchesSheetContext = !selectedHistoryScope || prod.sheet_reference === selectedHistoryScope;
     
     const matchesOperatorBound = authRole === 'Admin' || authRole === 'Manager' || 
-      authRole === 'Content Editor' || checkPermission('modify_sheets') ||
+      authRole === 'Content Editor' || checkPermission('excel_upload') || checkPermission('product_edit') || checkPermission('sheet_exports') || checkPermission('ad_hoc') ||
       (!prod.processed_by || prod.processed_by === loginUser);
 
     const searchLower = searchQuery.toLowerCase().trim();
@@ -2870,75 +3375,154 @@ export default function IntegratedOperationsPortal() {
     return getUserDisplayName(target);
   };
 
-  const permissionFeatures = [
-    { key: 'dashboard', label: 'Dashboard Access' },
-    { key: 'stores_manage', label: 'Create/Delete Stores' },
-    { key: 'excel_upload', label: 'Upload Excel Sheets' },
-    { key: 'ad_hoc', label: 'Add Ad-Hoc Products' },
-    { key: 'bulk_images', label: 'Bulk Image Upload' },
-    { key: 'product_images', label: 'Product Image Upload' },
-    { key: 'claim_status', label: 'Claim / Change Status' },
-    { key: 'submit_review', label: 'Submit Under Review' },
-    { key: 'review_images', label: 'Review Modal' },
-    { key: 'compare_images', label: 'Compare RAW/EDITED' },
-    { key: 'reject', label: 'Reject Products' },
-    { key: 'approve', label: 'Ready To Upload Approval' },
-    { key: 'status_override', label: 'Status Override' },
-    { key: 'remove_edited', label: 'Remove Edited Images' },
-    { key: 'asset_downloads', label: 'SKU Asset Downloads' },
-    { key: 'selected_downloads', label: 'Selected Asset Downloads' },
-    { key: 'sheet_exports', label: 'Original / Live Sheet Exports' },
-    { key: 'tasks_view', label: 'View Tasks' },
-    { key: 'tasks_manage', label: 'Post/Edit Tasks' },
-    { key: 'staff_register', label: 'Register Staff' },
-    { key: 'google_view', label: 'Open Google Sheets' },
-    { key: 'google_manage', label: 'Manage Google Sheet Link' },
-    { key: 'performance', label: 'Performance View' }
-  ];
+  const renderTaskRepliesPanel = (task) => {
+    if (!task?.id) return null;
 
-  const permissionRoles = [
-    { roleName: 'Admin', label: '⚙️ Full Access' },
-    { roleName: 'Manager', label: '🧭 Review Access' },
-    { roleName: 'Operator', label: '👤 Workflow Staff' },
-    { roleName: 'Photographer', label: '📸 Media Staff' },
-    { roleName: 'Content Editor', label: '📝 Sheet Staff' },
-    ...customRoles
-      .filter(role => !['Photographer', 'Content Editor'].includes(role.roleName))
-      .map(role => ({ roleName: role.roleName, label: `🎨 ${role.roleName}`, customRole: role }))
-  ];
+    const repliesForTask = getTaskRepliesForTask(task.id);
+    const isExpanded = expandedTaskReplyIds[task.id] ?? true;
+    const draftValue = taskReplyDrafts[task.id] || '';
+    const isSavingReply = taskReplySavingId === task.id;
 
-  const hasMatrixPermission = (roleName, featureKey) => {
-    if (roleName === 'Admin') return true;
+    return (
+      <div className="mt-4 border-t border-gray-100 pt-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+          <button
+            type="button"
+            onClick={() => toggleTaskReplies(task.id)}
+            className="w-fit px-3 py-1.5 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-100 text-[10px] font-black uppercase tracking-wider hover:bg-indigo-100 transition-colors"
+          >
+            💬 Replies / Questions ({repliesForTask.length}) {isExpanded ? '▲' : '▼'}
+          </button>
+          <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Internal task chat</span>
+        </div>
 
-    if (roleName === 'Manager') {
-      return !['my_performance'].includes(featureKey);
-    }
+        {isExpanded && (
+          <div className="space-y-3">
+            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+              {repliesForTask.length === 0 ? (
+                <div className="p-4 rounded-xl border border-dashed border-gray-200 bg-gray-50 text-center text-[11px] font-bold text-gray-400 uppercase">
+                  No replies yet. Ask a question or send an update below.
+                </div>
+              ) : (
+                repliesForTask.map((reply) => {
+                  const isOwnReplyMessage = isOwnTaskReply(reply);
+                  const deleteInfo = getTaskReplyDeleteInfo(reply);
+                  const showDeleteControl = isTaskManager || isOwnReplyMessage;
+                  return (
+                    <div
+                      key={reply.id}
+                      className={`p-3 rounded-2xl border ${isOwnReplyMessage ? 'bg-[rgba(138,21,56,0.06)] border-[rgba(138,21,56,0.18)]' : 'bg-gray-50 border-gray-200'}`}
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-1">
+                        <div className="min-w-0">
+                          <span className={`text-[10px] font-black uppercase tracking-wider ${isOwnReplyMessage ? 'text-[#8a1538]' : 'text-gray-700'}`}>
+                            {getUserDisplayName(reply.user_name) || reply.user_name || 'Staff Member'}
+                          </span>
+                          {isOwnReplyMessage && (
+                            <span className="ml-2 text-[9px] font-black uppercase tracking-wider text-[#8a1538] bg-white/70 border border-[rgba(138,21,56,0.18)] px-1.5 py-0.5 rounded">
+                              You
+                            </span>
+                          )}
+                          <div className="text-[9px] font-bold text-gray-400 mt-0.5">
+                            {formatDisplayDateTime(reply.created_at)}
+                            {showDeleteControl && !deleteInfo.isExpired && (
+                              <span className="ml-2 text-[#8a1538]">Delete available for {deleteInfo.remainingMinutes}m</span>
+                            )}
+                            {showDeleteControl && deleteInfo.isExpired && (
+                              <span className="ml-2 text-gray-400">Delete locked after {TASK_REPLY_DELETE_WINDOW_MINUTES}m</span>
+                            )}
+                          </div>
+                        </div>
+                        {showDeleteControl && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteTaskReply(reply)}
+                            disabled={!deleteInfo.canDelete}
+                            title={deleteInfo.canDelete ? `Delete reply before ${deleteInfo.deleteUntilLabel}` : deleteInfo.reason}
+                            className={`text-[9px] font-black uppercase tracking-wider rounded-lg px-2 py-1 border ${deleteInfo.canDelete ? 'text-red-500 hover:text-red-700 bg-white border-red-100 hover:bg-red-50' : 'text-gray-400 bg-gray-100 border-gray-200 cursor-not-allowed'}`}
+                          >
+                            {deleteInfo.canDelete ? `Delete ${deleteInfo.remainingMinutes}m` : 'Locked'}
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-xs sm:text-sm text-gray-700 font-medium leading-relaxed whitespace-pre-wrap">
+                        {reply.message}
+                      </p>
+                    </div>
+                  );
+                })
+              )}
+            </div>
 
-    if (roleName === 'Operator') {
-      return [
-        'dashboard', 'product_images', 'claim_status', 'submit_review', 'remove_edited',
-        'asset_downloads', 'selected_downloads', 'tasks_view', 'google_view', 'performance'
-      ].includes(featureKey);
-    }
-
-    if (roleName === 'Photographer') {
-      return ['dashboard', 'bulk_images', 'asset_downloads', 'selected_downloads', 'tasks_view', 'google_view'].includes(featureKey);
-    }
-
-    if (roleName === 'Content Editor') {
-      return ['dashboard', 'excel_upload', 'sheet_exports', 'tasks_view', 'google_view'].includes(featureKey);
-    }
-
-    const customRole = customRoles.find(role => role.roleName === roleName);
-    if (!customRole) return false;
-
-    if (featureKey === 'dashboard' || featureKey === 'tasks_view' || featureKey === 'google_view') return true;
-    if (['bulk_images', 'product_images', 'asset_downloads', 'selected_downloads'].includes(featureKey)) return Boolean(customRole.permissions.canUploadAssets);
-    if (['excel_upload', 'sheet_exports', 'ad_hoc'].includes(featureKey)) return Boolean(customRole.permissions.canModifyDataSheets);
-    if (['review_images', 'compare_images', 'reject', 'approve'].includes(featureKey)) return Boolean(customRole.permissions.canReviewArrays);
-    if (['stores_manage', 'tasks_manage', 'status_override', 'google_manage'].includes(featureKey)) return Boolean(customRole.permissions.canSuperviseStaff);
-    return false;
+            {canReplyToTasks ? (
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  handleTaskReplySubmit(task.id);
+                }}
+                className="bg-gray-50 border border-gray-200 rounded-2xl p-3 space-y-2"
+              >
+                <textarea
+                  value={draftValue}
+                  onChange={(event) => setTaskReplyDraft(task.id, event.target.value)}
+                  placeholder="Reply to this task, ask for clarification, or send a progress update..."
+                  rows="2"
+                  className="w-full px-3 py-2 border border-gray-200 rounded-xl bg-white text-xs text-gray-900 outline-none resize-none focus:border-indigo-300"
+                />
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <span className="text-[10px] font-bold text-gray-400">
+                    Posting as {currentStaffName}
+                  </span>
+                  <button
+                    type="submit"
+                    disabled={isSavingReply || !draftValue.trim()}
+                    className="px-4 py-2 bg-indigo-700 hover:bg-indigo-800 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider"
+                  >
+                    {isSavingReply ? 'Sending...' : 'Send Reply'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-3 text-[11px] font-bold text-gray-400 uppercase text-center">
+                Reply permission is not enabled for your access group.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
   };
+
+  const permissionFeatures = PORTAL_PERMISSION_FEATURES;
+
+  const permissionFeaturesByCategory = permissionFeatures.reduce((groups, feature) => {
+    const category = feature.category || 'Other';
+    if (!groups[category]) groups[category] = [];
+    groups[category].push(feature);
+    return groups;
+  }, {});
+
+  const selectedNewRolePermissionCount = Object.values(newRoleForm.permissions || {}).filter(Boolean).length;
+
+  const setNewRolePermissionValue = (featureKey, checked) => {
+    setNewRoleForm(prev => ({
+      ...prev,
+      permissions: {
+        ...createPortalPermissionSet(false),
+        ...(prev.permissions || {}),
+        [featureKey]: checked
+      }
+    }));
+  };
+
+  const setAllNewRolePermissions = (checked) => {
+    setNewRoleForm(prev => ({
+      ...prev,
+      permissions: createPortalPermissionSet(checked)
+    }));
+  };
+
+  const hasMatrixPermission = (roleName, featureKey) => roleAllowsPortalFeature(roleName, customRoles, featureKey);
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans flex flex-col selection:bg-[rgba(138,21,56,0.85)] selection:text-white">
@@ -3024,7 +3608,7 @@ export default function IntegratedOperationsPortal() {
                   <button onClick={() => setActiveTab('home')} className="w-full h-10 rounded-xl bg-white hover:bg-gray-100 text-sm border border-gray-100" title="Home">🏠</button>
                   <button onClick={() => setActiveTab('dashboard')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'dashboard' ? 'bg-[rgba(138,21,56,0.85)] text-white border-[rgba(138,21,56,0.85)]' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Products Dashboard">📊</button>
                   <button onClick={() => setActiveTab('task_board')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'task_board' ? 'bg-indigo-700 text-white border-indigo-700' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Task Board">🧾</button>
-                  {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('supervise_staff')) && (
+                  {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('performance')) && (
                     <button onClick={() => setActiveTab('operators')} className={`w-full h-10 rounded-xl text-sm border ${activeTab === 'operators' ? 'bg-teal-700 text-white border-teal-700' : 'bg-white hover:bg-gray-100 border-gray-100'}`} title="Staff Activity">👥</button>
                   )}
                   {canViewMyPerformance && selfPerformanceStats && (
@@ -3065,7 +3649,7 @@ export default function IntegratedOperationsPortal() {
                     🧾 Task Board {openTaskCount > 0 ? `(${openTaskCount})` : ''}
                   </button>
 
-                  {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('supervise_staff')) && (
+                  {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('performance')) && (
                     <button 
                       onClick={() => setActiveTab('operators')} 
                       className={`w-full text-left px-3 py-2 text-xs font-black uppercase tracking-wide rounded-lg transition-all ${activeTab === 'operators' ? 'bg-teal-700 text-white shadow-xs' : 'text-gray-700 hover:bg-gray-100'}`}
@@ -3176,18 +3760,17 @@ export default function IntegratedOperationsPortal() {
 
                           {(authRole === 'Admin' || authRole === 'Manager') && (
                             <div className="mx-2 mb-2 grid grid-cols-2 gap-1.5">
-                              <label
-                                className={`px-2 py-1 rounded-md text-center text-[9px] font-black uppercase cursor-pointer border transition-all ${isActiveStore ? 'bg-white/10 text-white border-white/20 hover:bg-white/20' : 'bg-gray-50 text-gray-500 border-gray-100 hover:bg-gray-100'}`}
-                                title="Upload or replace store card image"
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openStoreEditModal(store);
+                                }}
+                                className={`px-2 py-1 rounded-md text-center text-[9px] font-black uppercase border transition-all ${isActiveStore ? 'bg-white/10 text-white border-white/20 hover:bg-white/20' : 'bg-gray-50 text-gray-500 border-gray-100 hover:bg-gray-100'} cursor-pointer`}
+                                title="Edit store name, image, or remove the image"
                               >
-                                {storeImageUploadingId === store.id ? 'Uploading...' : store.image_url ? 'Image' : 'Upload'}
-                                <input
-                                  type="file"
-                                  accept="image/*"
-                                  onChange={(e) => handleStoreImageUpload(store.id, e)}
-                                  className="hidden"
-                                />
-                              </label>
+                                Edit
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => handleDeleteStore(store.id, store.name)}
@@ -3236,9 +3819,9 @@ export default function IntegratedOperationsPortal() {
 
             <div className="p-2 border-t text-center">
               {isSidePanelCollapsed ? (
-                <span className="text-[10px] font-mono text-gray-400">v4.4</span>
+                <span className="text-[10px] font-mono text-gray-400">v4.5</span>
               ) : (
-                <span className="text-[10px] font-mono text-gray-400">v4.4 Clean Staff Display</span>
+                <span className="text-[10px] font-mono text-gray-400">v4.5 Store Editing</span>
               )}
             </div>
           </aside>
@@ -3459,15 +4042,16 @@ export default function IntegratedOperationsPortal() {
 
                                 {(authRole === 'Admin' || authRole === 'Manager') && (
                                   <div className="px-4 pb-4 grid grid-cols-2 gap-2">
-                                    <label className="px-3 py-2 rounded-xl text-center text-[10px] font-black uppercase cursor-pointer border bg-gray-50 text-gray-600 border-gray-100 hover:bg-gray-100">
-                                      {storeImageUploadingId === store.id ? 'Uploading...' : store.image_url ? 'Replace Image' : 'Upload Image'}
-                                      <input
-                                        type="file"
-                                        accept="image/*"
-                                        onChange={(e) => handleStoreImageUpload(store.id, e)}
-                                        className="hidden"
-                                      />
-                                    </label>
+                                    <button
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        openStoreEditModal(store);
+                                      }}
+                                      className="px-3 py-2 rounded-xl text-center text-[10px] font-black uppercase cursor-pointer border bg-[rgba(138,21,56,0.06)] text-[#8a1538] border-[rgba(138,21,56,0.18)] hover:bg-[rgba(138,21,56,0.10)]"
+                                    >
+                                      Edit Store
+                                    </button>
                                     <button
                                       type="button"
                                       onClick={() => handleDeleteStore(store.id, store.name)}
@@ -3572,7 +4156,12 @@ export default function IntegratedOperationsPortal() {
                                     <span className={`text-[9px] px-2 py-1 rounded border font-black uppercase ${getPriorityClass(task.priority)}`}>{task.priority}</span>
                                   </div>
                                   <p className="text-xs text-gray-500 font-semibold mt-2 line-clamp-2">{task.description || 'No description provided.'}</p>
-                                  <div className="text-[10px] text-gray-400 font-bold mt-2">Due: {formatDisplayDateTime(task.due_at)}</div>
+                                  <div className="flex items-center justify-between gap-2 mt-2">
+                                    <div className="text-[10px] text-gray-400 font-bold">Due: {formatDisplayDateTime(task.due_at)}</div>
+                                    <span className="text-[10px] text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full font-black uppercase">
+                                      💬 {getTaskReplyCount(task.id)}
+                                    </span>
+                                  </div>
                                 </button>
                               ))
                             )}
@@ -3866,7 +4455,7 @@ export default function IntegratedOperationsPortal() {
                         <div>
                           <span className="text-xxs uppercase tracking-widest font-black text-indigo-300 bg-indigo-900/40 border border-indigo-800/50 px-2.5 py-1 rounded-md">Team Dispatch Board</span>
                           <h1 className="text-3xl font-black mt-3 tracking-tight">Task Board</h1>
-                          <p className="text-sm text-slate-300 font-medium mt-1">Authorized users can post assignments. Staff can view the work queue from the side panel or this large view.</p>
+                          <p className="text-sm text-slate-300 font-medium mt-1">Authorized users can post assignments. Staff can reply, ask questions, and send progress updates inside each task thread.</p>
                         </div>
                         <div className="text-right">
                           <div className="text-3xl font-black">{openTaskCount}</div>
@@ -3881,12 +4470,18 @@ export default function IntegratedOperationsPortal() {
                       </div>
                     )}
 
+                    {taskReplyError && (
+                      <div className="p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-bold">
+                        Task replies warning: {taskReplyError}. Check the task_replies table permissions if replies do not load or send.
+                      </div>
+                    )}
+
                     {isTaskManager && (
                       <div className="bg-white border border-gray-200 rounded-2xl p-6 shadow-xs">
                         <h2 className="text-sm font-black text-gray-900 uppercase tracking-wider mb-1">
                           {editingTaskId ? 'Edit Task' : 'Post New Task'}
                         </h2>
-                        <p className="text-xs text-gray-400 font-semibold mb-5">Tasks posted here are visible to employees immediately after save.</p>
+                        <p className="text-xs text-gray-400 font-semibold mb-5">Tasks posted here are visible immediately, and every visible employee can reply in the task chat thread.</p>
                         <form onSubmit={handleTaskSubmit} className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                           <div className="lg:col-span-4">
                             <label className="block text-[10px] font-black uppercase text-gray-400 mb-1">Task Title *</label>
@@ -3965,13 +4560,117 @@ export default function IntegratedOperationsPortal() {
                       </div>
                     )}
 
+                    <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-xs">
+                      <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+                        <div>
+                          <h2 className="text-sm font-black text-gray-900 uppercase tracking-wider">Task Filters</h2>
+                          <p className="text-xs text-gray-400 font-semibold mt-1">
+                            {isTaskManager
+                              ? 'Managers see every task. Use filters to view All Staff, role-based, or individual employee tasks.'
+                              : 'Filter your visible task queue by status, priority, or search.'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTaskSearchQuery('');
+                            setTaskStatusFilter('All');
+                            setTaskPriorityFilter('All');
+                            setTaskTargetFilter('All');
+                          }}
+                          className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-[10px] font-black uppercase tracking-wider"
+                        >
+                          Clear Filters
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
+                        <div className="md:col-span-1">
+                          <label className="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Search</label>
+                          <input
+                            type="text"
+                            value={taskSearchQuery}
+                            onChange={(e) => setTaskSearchQuery(e.target.value)}
+                            placeholder="Search title, details, sender..."
+                            className="w-full px-3 py-2 border border-gray-200 rounded-xl bg-gray-50 text-xs text-gray-900 outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Status</label>
+                          <select
+                            value={taskStatusFilter}
+                            onChange={(e) => setTaskStatusFilter(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-200 rounded-xl bg-white text-xs text-gray-900 font-bold outline-none"
+                          >
+                            {taskStatusFilterOptions.map(statusOption => (
+                              <option key={statusOption} value={statusOption}>{statusOption === 'All' ? 'All Statuses' : statusOption}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Priority</label>
+                          <select
+                            value={taskPriorityFilter}
+                            onChange={(e) => setTaskPriorityFilter(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-200 rounded-xl bg-white text-xs text-gray-900 font-bold outline-none"
+                          >
+                            {taskPriorityFilterOptions.map(priorityOption => (
+                              <option key={priorityOption} value={priorityOption}>{priorityOption === 'All' ? 'All Priorities' : priorityOption}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Visible To</label>
+                          <select
+                            value={taskTargetFilter}
+                            onChange={(e) => setTaskTargetFilter(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-200 rounded-xl bg-white text-xs text-gray-900 font-bold outline-none"
+                          >
+                            {taskTargetFilterOptions.map(targetOption => (
+                              <option key={targetOption} value={targetOption}>{targetOption === 'All' ? 'All Targets' : formatTaskTargetLabel(targetOption)}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4 text-center">
+                        <div className="bg-gray-50 border rounded-xl p-3">
+                          <span className="block text-[9px] font-black uppercase text-gray-400">Visible</span>
+                          <b className="block text-lg font-black text-gray-900">{visibleTasks.length}</b>
+                        </div>
+                        <div className="bg-amber-50 border border-amber-100 rounded-xl p-3">
+                          <span className="block text-[9px] font-black uppercase text-amber-700">Open</span>
+                          <b className="block text-lg font-black text-amber-800">{visibleTasks.filter(task => (task.status || 'Open') === 'Open').length}</b>
+                        </div>
+                        <div className="bg-[rgba(138,21,56,0.06)] border border-[rgba(138,21,56,0.18)] rounded-xl p-3">
+                          <span className="block text-[9px] font-black uppercase text-[#8a1538]">Progress</span>
+                          <b className="block text-lg font-black text-[#8a1538]">{visibleTasks.filter(task => task.status === 'In Progress').length}</b>
+                        </div>
+                        <div className="bg-green-50 border border-green-100 rounded-xl p-3">
+                          <span className="block text-[9px] font-black uppercase text-green-700">Done</span>
+                          <b className="block text-lg font-black text-green-800">{visibleTasks.filter(task => task.status === 'Done').length}</b>
+                        </div>
+                        <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3">
+                          <span className="block text-[9px] font-black uppercase text-indigo-700">Showing</span>
+                          <b className="block text-lg font-black text-indigo-800">{filteredVisibleTasks.length}</b>
+                        </div>
+                      </div>
+                    </div>
+
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                       {visibleTasks.length === 0 ? (
                         <div className="lg:col-span-2 text-center text-xs text-gray-400 font-bold uppercase py-16 bg-white border rounded-2xl">
                           No tasks available for you.
                         </div>
+                      ) : filteredVisibleTasks.length === 0 ? (
+                        <div className="lg:col-span-2 text-center text-xs text-gray-400 font-bold uppercase py-16 bg-white border rounded-2xl">
+                          No tasks match the selected filters.
+                        </div>
                       ) : (
-                        visibleTasks.map(task => (
+                        filteredVisibleTasks.map(task => (
                           <div key={task.id} className="bg-white border border-gray-200 rounded-2xl p-5 shadow-xs hover:shadow-sm transition-all">
                             <div className="flex items-start justify-between gap-4 mb-3">
                               <div>
@@ -3983,6 +4682,7 @@ export default function IntegratedOperationsPortal() {
                               <div className="flex flex-col items-end gap-1">
                                 <span className={`px-2.5 py-1 rounded-lg border text-[10px] font-black uppercase ${getPriorityClass(task.priority)}`}>{task.priority || 'Normal'}</span>
                                 <span className={`px-2.5 py-1 rounded-lg border text-[10px] font-black uppercase ${getTaskStatusClass(task.status)}`}>{task.status || 'Open'}</span>
+                                <span className="px-2.5 py-1 rounded-lg border text-[10px] font-black uppercase bg-indigo-50 text-indigo-700 border-indigo-100">💬 {getTaskReplyCount(task.id)}</span>
                               </div>
                             </div>
                             {task.description && <p className="text-sm text-gray-600 font-medium whitespace-pre-wrap leading-relaxed mb-4">{task.description}</p>}
@@ -4008,6 +4708,7 @@ export default function IntegratedOperationsPortal() {
                                 </>
                               )}
                             </div>
+                            {renderTaskRepliesPanel(task)}
                           </div>
                         ))
                       )}
@@ -4031,7 +4732,16 @@ export default function IntegratedOperationsPortal() {
                         </p>
                       </div>
                       <div className="flex gap-2">
-                        {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('modify_sheets')) && (
+                        {(authRole === 'Admin' || authRole === 'Manager') && isStoreScoped && selectedStore && (
+                          <button
+                            type="button"
+                            onClick={() => openStoreEditModal(selectedStore)}
+                            className="bg-[rgba(138,21,56,0.06)] text-[#8a1538] border border-[rgba(138,21,56,0.18)] font-black text-xs px-4 py-2 rounded-xl hover:bg-[rgba(138,21,56,0.10)] transition uppercase"
+                          >
+                            Edit Store
+                          </button>
+                        )}
+                        {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('ad_hoc')) && (
                           <button 
                             onClick={() => setShowAdHocModal(true)}
                             className="bg-[#8a1538] text-white font-black text-xs px-4 py-2 rounded-xl shadow hover:bg-[rgba(138,21,56,0.95)] transition uppercase"
@@ -4139,7 +4849,7 @@ export default function IntegratedOperationsPortal() {
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-                      {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('modify_sheets')) && (
+                      {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('excel_upload')) && (
                         <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-gray-200 flex flex-col justify-between">
                           <div>
                             <div className="flex items-center justify-between mb-3">
@@ -4161,7 +4871,7 @@ export default function IntegratedOperationsPortal() {
                         </div>
                       )}
 
-                      {(authRole === 'Admin' || authRole === 'Manager' || authRole === 'Photographer' || checkPermission('upload_assets')) && (
+                      {(authRole === 'Admin' || authRole === 'Manager' || authRole === 'Photographer' || checkPermission('bulk_images')) && (
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-[rgba(138,21,56,0.28)] flex flex-col justify-between bg-gradient-to-br from-blue-50/40 via-white to-white">
                           <div>
                             <h3 className="text-sm font-black text-[rgba(138,21,56,0.85)] uppercase tracking-wide flex items-center gap-2">
@@ -4339,7 +5049,7 @@ export default function IntegratedOperationsPortal() {
                                         </div>
                                       ) : (
                                         <div className="space-x-1 flex justify-center">
-                                          {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('modify_sheets')) && (
+                                          {(authRole === 'Admin' || authRole === 'Manager' || checkPermission('product_edit')) && (
                                             <button onClick={() => startEditing(prod)} className="px-3 py-1 border text-xs rounded text-gray-600 bg-white cursor-pointer hover:bg-gray-50">Edit</button>
                                           )}
                                         </div>
@@ -4357,7 +5067,7 @@ export default function IntegratedOperationsPortal() {
                 )}
 
                 {/* ACTIVE REGISTERED DIRECTORY TAB */}
-                {activeTab === 'operators' && (authRole === 'Admin' || authRole === 'Manager' || checkPermission('supervise_staff')) && (
+                {activeTab === 'operators' && (authRole === 'Admin' || authRole === 'Manager' || checkPermission('performance')) && (
                   <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-xs">
                     <h2 className="text-xl font-bold text-gray-900 mb-6">Registered Systems Staff Directory</h2>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -4773,6 +5483,104 @@ export default function IntegratedOperationsPortal() {
         </main>
       </div>
 
+      {/* STORE EDIT MODAL */}
+      {editingStore && (authRole === 'Admin' || authRole === 'Manager') && (
+        <div className="fixed inset-0 bg-[rgba(138,21,56,1)]/60 backdrop-blur-md flex items-center justify-center p-4 z-[74] animate-fadeIn">
+          <div className="bg-white border rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden">
+            <div className="flex items-start justify-between gap-4 border-b p-6 bg-gray-50">
+              <div>
+                <h3 className="font-black text-lg text-gray-900 uppercase">Edit Store</h3>
+                <p className="text-xs font-semibold text-gray-400 mt-1">Change the store name, add or replace its image, or remove the current image.</p>
+              </div>
+              <button onClick={closeStoreEditModal} className="text-gray-400 text-xl cursor-pointer hover:text-gray-900">✕</button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              <div className="relative h-56 rounded-2xl overflow-hidden border bg-gradient-to-br from-emerald-900 via-[rgba(138,21,56,0.95)] to-[rgba(138,21,56,1)]">
+                {editingStore.image_url ? (
+                  <img src={editingStore.image_url} alt={editingStore.name || 'Store image'} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center text-white/85">
+                    <div className="text-6xl mb-2">🏪</div>
+                    <div className="text-xs font-black uppercase tracking-widest">No store image added</div>
+                  </div>
+                )}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-transparent pointer-events-none"></div>
+                <div className="absolute left-5 bottom-4 right-5">
+                  <div className="text-2xl font-black text-white truncate">{editingStore.name || 'Unnamed Store'}</div>
+                  <div className="text-[10px] font-black text-white/80 uppercase tracking-wider">Store ID: {editingStore.id}</div>
+                </div>
+              </div>
+
+              <form onSubmit={handleUpdateStoreName} className="space-y-3">
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-gray-400 tracking-widest mb-1.5">Store Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={storeEditForm.name}
+                    onChange={(e) => setStoreEditForm({ ...storeEditForm, name: e.target.value })}
+                    placeholder="Store name..."
+                    className="w-full px-4 py-3 text-sm border rounded-xl bg-gray-50 text-gray-900 outline-none focus:bg-white"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={storeEditSaving}
+                  className="w-full py-3 bg-[#8a1538] hover:bg-[rgba(138,21,56,0.95)] text-white text-xs uppercase font-black rounded-xl cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {storeEditSaving ? 'Saving Store Name...' : 'Save Store Name'}
+                </button>
+              </form>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 border-t pt-5">
+                <label className={`w-full py-3 rounded-xl text-center text-xs font-black uppercase tracking-wider border transition-all ${storeImageUploadingId === editingStore.id ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-[rgba(138,21,56,0.06)] text-[#8a1538] border-[rgba(138,21,56,0.18)] hover:bg-[rgba(138,21,56,0.10)] cursor-pointer'}`}>
+                  {storeImageUploadingId === editingStore.id ? 'Uploading Image...' : editingStore.image_url ? 'Replace Store Image' : 'Add Store Image'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    disabled={storeImageUploadingId === editingStore.id}
+                    onChange={(e) => handleStoreImageUpload(editingStore.id, e)}
+                    className="hidden"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => handleRemoveStoreImage(editingStore.id)}
+                  disabled={!editingStore.image_url || storeImageRemovingId === editingStore.id || storeImageUploadingId === editingStore.id}
+                  className="w-full py-3 rounded-xl text-center text-xs font-black uppercase tracking-wider border bg-red-50 text-red-600 border-red-100 hover:bg-red-100 disabled:bg-gray-100 disabled:text-gray-400 disabled:border-gray-200 disabled:cursor-not-allowed"
+                >
+                  {storeImageRemovingId === editingStore.id ? 'Removing Image...' : 'Remove Store Image'}
+                </button>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-[11px] font-bold text-amber-800 leading-relaxed">
+                Replacing an image updates the store card immediately and attempts to clean up the old storage file. Removing an image clears the store card image but keeps the store and all linked products.
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <button
+                  type="button"
+                  onClick={closeStoreEditModal}
+                  className="flex-1 py-3 border rounded-xl text-xs font-black uppercase text-gray-600 hover:bg-gray-50"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteStore(editingStore.id, editingStore.name)}
+                  disabled={uploading}
+                  className="flex-1 py-3 bg-red-50 hover:bg-red-100 border border-red-100 text-red-700 rounded-xl text-xs font-black uppercase disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Delete Store
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* AD-HOC MANUAL ENTRY MODAL */}
       {showAdHocModal && (
         <div className="fixed inset-0 bg-[rgba(138,21,56,1)]/60 backdrop-blur-md flex items-center justify-center p-4 z-[70] animate-fadeIn">
@@ -4863,26 +5671,88 @@ export default function IntegratedOperationsPortal() {
       {/* CUSTOM DEPARTMENT MODAL */}
       {showRoleModal && (
         <div className="fixed inset-0 bg-[rgba(138,21,56,1)]/60 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fadeIn">
-          <div className="bg-white border rounded-3xl w-full max-w-md shadow-2xl p-6 overflow-hidden">
-            <div className="flex items-center justify-between border-b pb-3 mb-5">
-              <h3 className="font-black text-base text-gray-900 uppercase">Deploy Custom Permissions</h3>
-              <button onClick={() => setShowRoleModal(false)} className="text-gray-400 text-lg cursor-pointer">✕</button>
+          <div className="bg-white border rounded-3xl w-full max-w-5xl shadow-2xl p-6 overflow-hidden max-h-[92vh] flex flex-col">
+            <div className="flex items-start justify-between gap-4 border-b pb-4 mb-5">
+              <div>
+                <h3 className="font-black text-base text-gray-900 uppercase">Deploy Custom Permissions</h3>
+                <p className="text-xs font-semibold text-gray-400 mt-1">
+                  Choose exactly which portal features this custom access group can use.
+                </p>
+              </div>
+              <button onClick={() => setShowRoleModal(false)} className="text-gray-400 text-lg cursor-pointer hover:text-gray-900">✕</button>
             </div>
-            <form onSubmit={handleCreateCustomRole} className="space-y-5">
+            <form onSubmit={handleCreateCustomRole} className="space-y-5 overflow-y-auto pr-1">
               <div>
                 <label className="block text-xxs font-black uppercase text-gray-400 tracking-widest mb-1.5">Custom Group Name</label>
-                <input 
-                  type="text" required value={newRoleForm.roleName} onChange={(e) => setNewRoleForm({...newRoleForm, roleName: e.target.value})} placeholder="e.g. Lead Editor..." 
-                  className="w-full px-4 py-2.5 text-sm border rounded-xl bg-gray-50 text-gray-900"
+                <input
+                  type="text"
+                  required
+                  value={newRoleForm.roleName}
+                  onChange={(e) => setNewRoleForm({ ...newRoleForm, roleName: e.target.value })}
+                  placeholder="e.g. Lead Editor, Store Auditor, Task Coordinator..."
+                  className="w-full px-4 py-2.5 text-sm border rounded-xl bg-gray-50 text-gray-900 outline-none focus:bg-white focus:border-[rgba(138,21,56,0.45)]"
                 />
               </div>
-              <div className="space-y-3 bg-slate-50 p-4 rounded-xl border">
-                <label className="flex items-center justify-between cursor-pointer"><span className="text-xs text-gray-700">Bulk Upload Media</span><input type="checkbox" checked={newRoleForm.canUploadAssets} onChange={(e) => setNewRoleForm({...newRoleForm, canUploadAssets: e.target.checked})} /></label>
-                <label className="flex items-center justify-between cursor-pointer"><span className="text-xs text-gray-700">Modify Layout Sheets</span><input type="checkbox" checked={newRoleForm.canModifyDataSheets} onChange={(e) => setNewRoleForm({...newRoleForm, canModifyDataSheets: e.target.checked})} /></label>
+
+              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <h4 className="text-xs font-black uppercase tracking-wider text-gray-900">Feature Permissions</h4>
+                    <p className="text-[10px] font-bold text-gray-400 mt-1">
+                      Selected: {selectedNewRolePermissionCount} / {permissionFeatures.length}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAllNewRolePermissions(true)}
+                      className="px-3 py-1.5 bg-white hover:bg-gray-100 border border-gray-200 rounded-lg text-[10px] font-black uppercase text-gray-700"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllNewRolePermissions(false)}
+                      className="px-3 py-1.5 bg-red-50 hover:bg-red-100 border border-red-100 rounded-lg text-[10px] font-black uppercase text-red-600"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4 max-h-[52vh] overflow-y-auto pr-2">
+                  {Object.entries(permissionFeaturesByCategory).map(([category, features]) => (
+                    <div key={category} className="bg-white border border-gray-200 rounded-2xl p-4">
+                      <div className="text-[10px] font-black uppercase tracking-widest text-[#8a1538] mb-3">
+                        {category}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {features.map(feature => {
+                          const checked = Boolean(newRoleForm.permissions?.[feature.key]);
+                          return (
+                            <label
+                              key={feature.key}
+                              className={`flex items-center justify-between gap-3 rounded-xl border px-3 py-2 cursor-pointer transition-all ${checked ? 'bg-[rgba(138,21,56,0.06)] border-[rgba(138,21,56,0.28)] text-[#8a1538]' : 'bg-gray-50 border-gray-100 text-gray-700 hover:bg-gray-100'}`}
+                            >
+                              <span className="text-[11px] font-black uppercase tracking-wide leading-tight">{feature.label}</span>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => setNewRolePermissionValue(feature.key, e.target.checked)}
+                                className="w-4 h-4 accent-[#8a1538] shrink-0"
+                              />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="flex gap-3 pt-2">
-                <button type="button" onClick={() => setShowRoleModal(false)} className="w-1/3 py-2.5 border rounded-xl text-xs font-bold text-gray-600">Cancel</button>
-                <button type="submit" className="w-2/3 py-2.5 bg-[#8a1538] text-white text-xs uppercase font-black rounded-xl cursor-pointer">Deploy Group</button>
+
+              <div className="flex gap-3 pt-2 border-t border-gray-100 sticky bottom-0 bg-white pb-1">
+                <button type="button" onClick={() => setShowRoleModal(false)} className="w-1/3 py-2.5 border rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-50">Cancel</button>
+                <button type="submit" className="w-2/3 py-2.5 bg-[#8a1538] text-white text-xs uppercase font-black rounded-xl cursor-pointer hover:bg-[rgba(138,21,56,0.95)]">Deploy Group</button>
               </div>
             </form>
           </div>

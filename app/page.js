@@ -9,6 +9,9 @@ import JSZip from 'jszip';
 // Primary accent uses rgba(138, 21, 56, 0.85) with white surfaces.
 // Semantic status colors are still used where helpful.
 
+const BULK_STORAGE_UPLOAD_CONCURRENCY = 6;
+const BULK_PRODUCT_UPDATE_CONCURRENCY = 8;
+const BULK_PROGRESS_THROTTLE_MS = 250;
 
 const PORTAL_PERMISSION_FEATURES = [
   { key: 'dashboard', label: 'Dashboard Access', category: 'Core Portal' },
@@ -188,6 +191,7 @@ export default function IntegratedOperationsPortal() {
   const [storeEditSaving, setStoreEditSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [bulkUploadProgress, setBulkUploadProgress] = useState(null);
   const [imageUploadingProductId, setImageUploadingProductId] = useState(null);
   const [realtimeStatus, setRealtimeStatus] = useState('Connecting...');
 
@@ -2095,17 +2099,63 @@ export default function IntegratedOperationsPortal() {
         .trim();
     };
 
-    const { data: productCatalog, error: catalogError } = await supabase
+    const runWithConcurrency = async (items, concurrency, worker) => {
+      const safeItems = Array.isArray(items) ? items : [];
+      if (safeItems.length === 0) return [];
+
+      const results = new Array(safeItems.length);
+      let nextIndex = 0;
+      const workerCount = Math.min(Math.max(1, concurrency || 1), safeItems.length);
+
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (nextIndex < safeItems.length) {
+          const currentIndex = nextIndex;
+          nextIndex += 1;
+          results[currentIndex] = await worker(safeItems[currentIndex], currentIndex);
+        }
+      });
+
+      await Promise.all(workers);
+      return results;
+    };
+
+    let lastProgressPushAt = 0;
+    const pushBulkProgress = (nextProgress, force = false) => {
+      const nowMs = Date.now();
+      if (!force && nowMs - lastProgressPushAt < BULK_PROGRESS_THROTTLE_MS) return;
+      lastProgressPushAt = nowMs;
+      setBulkUploadProgress(prev => ({
+        sourceLabel,
+        ...(prev || {}),
+        ...nextProgress,
+        updatedAt: nowMs
+      }));
+    };
+
+    pushBulkProgress({
+      phase: 'Reading product catalog',
+      total: entries.length,
+      processed: 0,
+      uploaded: 0,
+      skipped: 0,
+      productCount: 0
+    }, true);
+
+    const { data: catalogData, error: catalogError } = await supabase
       .from('products')
-      .select('*');
+      .select('id, sku, raw_image_url, edited_image_url, store_id')
+      .eq('store_id', zipScopedStoreId);
 
     if (catalogError) throw catalogError;
 
-    const catalog = (productCatalog || []).filter(
-      p => Number(p.store_id || 0) === zipScopedStoreId
-    );
+    const catalog = catalogData || [];
+    if (catalog.length === 0) {
+      throw new Error('No products were found for this store. Upload the store Excel sheet before uploading product images.');
+    }
 
-    // Build a safe lookup list for every product.
+    const productById = new Map(catalog.map(product => [product.id, product]));
+
+    // Build a fast lookup list for every product.
     // It starts with the product SKU, then adds Barcode/EAN/UPC aliases from the original Excel archive.
     // This avoids forcing photographers to name folders by SKU only. They can name them by SKU or Barcode.
     const productAliasMap = new Map();
@@ -2119,9 +2169,6 @@ export default function IntegratedOperationsPortal() {
 
     catalog.forEach(product => {
       addAliasToProduct(product.id, product.sku);
-      addAliasToProduct(product.id, product.barcode);
-      getArray(product.barcodes).forEach(code => addAliasToProduct(product.id, code));
-      getArray(product.barcode_aliases).forEach(code => addAliasToProduct(product.id, code));
     });
 
     const SKU_COLUMN_KEYWORDS = ['sku', 'itemcode', 'itemno', 'itemnumber', 'productcode', 'productid', 'model'];
@@ -2155,7 +2202,23 @@ export default function IntegratedOperationsPortal() {
       });
     });
 
+    const exactAliasMap = new Map();
+
+    productAliasMap.forEach((aliases, productId) => {
+      aliases.forEach(alias => {
+        const aliasNorm = normalizeSku(alias);
+        if (!aliasNorm) return;
+        if (!exactAliasMap.has(aliasNorm)) exactAliasMap.set(aliasNorm, new Set());
+        exactAliasMap.get(aliasNorm).add(productId);
+      });
+    });
+
     const getProductLookupValues = (product) => Array.from(productAliasMap.get(product.id) || new Set([product.sku])).filter(Boolean);
+
+    const getUniqueProductFromIdSet = (productIds) => {
+      const ids = Array.from(productIds || []);
+      return ids.length === 1 ? productById.get(ids[0]) || null : null;
+    };
 
     const findMatchingProduct = (skuCandidates) => {
       const cleanedCandidates = Array.from(
@@ -2170,20 +2233,18 @@ export default function IntegratedOperationsPortal() {
         const candidateNorm = normalizeSku(candidate);
         if (!candidateNorm) continue;
 
-        const exactMatches = catalog.filter(product =>
-          getProductLookupValues(product).some(alias => normalizeSku(alias) === candidateNorm)
-        );
-
-        // Exact SKU or exact Barcode match is safest. Use it only if it points to one product.
-        if (exactMatches.length === 1) return exactMatches[0];
+        const exactProduct = getUniqueProductFromIdSet(exactAliasMap.get(candidateNorm));
+        if (exactProduct) return exactProduct;
       }
 
       for (const candidate of cleanedCandidates) {
         const candidateNorm = normalizeSku(candidate);
         if (!candidateNorm) continue;
 
-        const prefixMatches = catalog.filter(product =>
-          getProductLookupValues(product).some(alias => {
+        const prefixMatchIds = new Set();
+
+        for (const product of catalog) {
+          const hasPrefixMatch = getProductLookupValues(product).some(alias => {
             const aliasNorm = normalizeSku(alias);
             if (!aliasNorm) return false;
 
@@ -2191,29 +2252,40 @@ export default function IntegratedOperationsPortal() {
               candidateNorm.startsWith(aliasNorm) ||
               aliasNorm.startsWith(candidateNorm)
             );
-          })
-        );
+          });
+
+          if (hasPrefixMatch) prefixMatchIds.add(product.id);
+        }
 
         // Only use prefix match when it is safe and unique.
-        if (prefixMatches.length === 1) return prefixMatches[0];
+        const prefixProduct = getUniqueProductFromIdSet(prefixMatchIds);
+        if (prefixProduct) return prefixProduct;
       }
 
       return null;
     };
 
-    const productUpdates = {};
     const skippedFiles = [];
     const unmatchedSkuCandidates = new Set();
-    let uploadedFileCount = 0;
+    const uploadJobs = [];
 
-    for (const entry of entries) {
+    pushBulkProgress({
+      phase: 'Matching files to SKUs',
+      total: entries.length,
+      processed: 0,
+      uploaded: 0,
+      skipped: 0,
+      productCount: 0
+    }, true);
+
+    entries.forEach((entry, entryIndex) => {
       const relativePath = entry.relativePath || entry.name || '';
       const parts = relativePath.split('/').filter(Boolean);
       const originalFileName = parts[parts.length - 1];
 
       if (!isImageFile(originalFileName)) {
         skippedFiles.push(`${relativePath} → skipped, not an image`);
-        continue;
+        return;
       }
 
       const folderIndex = parts.findIndex(part => {
@@ -2223,7 +2295,7 @@ export default function IntegratedOperationsPortal() {
 
       if (folderIndex === -1) {
         skippedFiles.push(`${relativePath} → skipped, RAW/EDITED folder not found`);
-        continue;
+        return;
       }
 
       const folderLabel = String(parts[folderIndex]).toUpperCase();
@@ -2251,77 +2323,252 @@ export default function IntegratedOperationsPortal() {
       if (!matchedProduct) {
         unmatchedSkuCandidates.add(skuCandidates.join(' OR ') || relativePath);
         skippedFiles.push(`${relativePath} → skipped, no matching SKU/Barcode found`);
-        continue;
+        return;
       }
 
-      const fileData = await entry.getBlob();
-      const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}-${safeFileName(originalFileName)}`;
       const cleanSku = String(matchedProduct.sku || 'UNKNOWN').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const uniqueName = `${Date.now()}-${entryIndex + 1}-${Math.random().toString(36).slice(2)}-${safeFileName(originalFileName)}`;
       const storagePath = `stores/${zipScopedStoreId}/${cleanSku}/${assetType}/${uniqueName}`;
 
-      const { error: uploadError } = await supabase.storage
-        .from('product-assets')
-        .upload(storagePath, fileData);
+      uploadJobs.push({
+        entry,
+        relativePath,
+        originalFileName,
+        matchedProduct,
+        assetType,
+        storagePath
+      });
 
-      if (uploadError) {
-        skippedFiles.push(`${relativePath} → storage upload failed: ${uploadError.message}`);
-        console.error(`Failed to upload ${storagePath}`, uploadError);
-        continue;
+      if ((entryIndex + 1) % 50 === 0) {
+        pushBulkProgress({
+          phase: 'Matching files to SKUs',
+          total: entries.length,
+          processed: entryIndex + 1,
+          uploaded: 0,
+          skipped: skippedFiles.length,
+          productCount: 0
+        });
       }
+    });
 
-      const { data: urlData } = supabase
-        .storage
-        .from('product-assets')
-        .getPublicUrl(storagePath);
+    if (uploadJobs.length === 0) {
+      pushBulkProgress({
+        phase: 'Complete',
+        total: entries.length || 1,
+        processed: entries.length,
+        uploaded: 0,
+        skipped: skippedFiles.length,
+        productCount: 0
+      }, true);
 
-      if (!productUpdates[matchedProduct.id]) {
-        productUpdates[matchedProduct.id] = {
-          product: matchedProduct,
-          raw: [],
-          edit: []
-        };
-      }
-
-      if (assetType === 'RAW') {
-        productUpdates[matchedProduct.id].raw.push(urlData.publicUrl);
-      } else {
-        productUpdates[matchedProduct.id].edit.push(urlData.publicUrl);
-      }
-
-      uploadedFileCount++;
+      return {
+        successCount: 0,
+        uploadedFileCount: 0,
+        skippedFiles,
+        unmatchedSkuCandidates: Array.from(unmatchedSkuCandidates),
+        sourceLabel
+      };
     }
 
+    let processedUploadCount = 0;
+    let uploadedFileCount = 0;
+
+    pushBulkProgress({
+      phase: `Uploading images (${Math.min(BULK_STORAGE_UPLOAD_CONCURRENCY, uploadJobs.length)} at a time)`,
+      total: uploadJobs.length,
+      processed: 0,
+      uploaded: 0,
+      skipped: skippedFiles.length,
+      productCount: 0
+    }, true);
+
+    const uploadResults = await runWithConcurrency(uploadJobs, BULK_STORAGE_UPLOAD_CONCURRENCY, async (job) => {
+      try {
+        const fileData = await job.entry.getBlob();
+
+        const { error: uploadError } = await supabase.storage
+          .from('product-assets')
+          .upload(job.storagePath, fileData, {
+            cacheControl: '3600',
+            upsert: false
+          });
+
+        if (uploadError) throw uploadError;
+
+        const { data: urlData } = supabase
+          .storage
+          .from('product-assets')
+          .getPublicUrl(job.storagePath);
+
+        if (!urlData?.publicUrl) {
+          throw new Error('Public URL could not be generated after upload.');
+        }
+
+        uploadedFileCount += 1;
+
+        return {
+          ok: true,
+          product: job.matchedProduct,
+          assetType: job.assetType,
+          publicUrl: urlData.publicUrl,
+          relativePath: job.relativePath
+        };
+      } catch (err) {
+        const message = err?.message || 'Unknown upload error';
+        skippedFiles.push(`${job.relativePath} → storage upload failed: ${message}`);
+        console.error(`Failed to upload ${job.storagePath}`, err);
+        return {
+          ok: false,
+          relativePath: job.relativePath,
+          error: message
+        };
+      } finally {
+        processedUploadCount += 1;
+        pushBulkProgress({
+          phase: `Uploading images (${Math.min(BULK_STORAGE_UPLOAD_CONCURRENCY, uploadJobs.length)} at a time)`,
+          total: uploadJobs.length,
+          processed: processedUploadCount,
+          uploaded: uploadedFileCount,
+          skipped: skippedFiles.length,
+          productCount: 0
+        }, processedUploadCount === uploadJobs.length || processedUploadCount % 5 === 0);
+      }
+    });
+
+    const productUpdates = new Map();
+
+    uploadResults
+      .filter(result => result?.ok)
+      .forEach(result => {
+        if (!productUpdates.has(result.product.id)) {
+          productUpdates.set(result.product.id, {
+            product: result.product,
+            raw: [],
+            edit: []
+          });
+        }
+
+        const targetUpdate = productUpdates.get(result.product.id);
+        if (result.assetType === 'RAW') {
+          targetUpdate.raw.push(result.publicUrl);
+        } else {
+          targetUpdate.edit.push(result.publicUrl);
+        }
+      });
+
+    const productUpdateList = Array.from(productUpdates.values());
+
+    if (productUpdateList.length === 0) {
+      pushBulkProgress({
+        phase: 'Complete',
+        total: uploadJobs.length,
+        processed: uploadJobs.length,
+        uploaded: uploadedFileCount,
+        skipped: skippedFiles.length,
+        productCount: 0
+      }, true);
+
+      return {
+        successCount: 0,
+        uploadedFileCount,
+        skippedFiles,
+        unmatchedSkuCandidates: Array.from(unmatchedSkuCandidates),
+        sourceLabel
+      };
+    }
+
+    pushBulkProgress({
+      phase: 'Refreshing current product records',
+      total: productUpdateList.length,
+      processed: 0,
+      uploaded: uploadedFileCount,
+      skipped: skippedFiles.length,
+      productCount: 0
+    }, true);
+
+    const productIdsToUpdate = productUpdateList.map(update => update.product.id).filter(Boolean);
+    if (productIdsToUpdate.length > 0) {
+      const { data: latestProductRows, error: latestProductReadError } = await supabase
+        .from('products')
+        .select('id, sku, raw_image_url, edited_image_url')
+        .in('id', productIdsToUpdate);
+
+      if (!latestProductReadError && latestProductRows) {
+        const latestProductById = new Map(latestProductRows.map(product => [product.id, product]));
+        productUpdateList.forEach(update => {
+          const latestProduct = latestProductById.get(update.product.id);
+          if (latestProduct) update.product = { ...update.product, ...latestProduct };
+        });
+      } else if (latestProductReadError) {
+        console.warn('Could not refresh latest product image arrays before bulk update. Continuing with the catalog snapshot.', latestProductReadError);
+      }
+    }
+
+    let processedProductUpdateCount = 0;
     let successCount = 0;
 
-    for (const update of Object.values(productUpdates)) {
-      const currentRaw = getArray(update.product.raw_image_url);
-      const currentEdit = getArray(update.product.edited_image_url);
+    pushBulkProgress({
+      phase: `Updating product records (${Math.min(BULK_PRODUCT_UPDATE_CONCURRENCY, productUpdateList.length)} at a time)`,
+      total: productUpdateList.length,
+      processed: 0,
+      uploaded: uploadedFileCount,
+      skipped: skippedFiles.length,
+      productCount: 0
+    }, true);
 
-      const nextRaw = [...currentRaw, ...update.raw];
-      const nextEdit = [...currentEdit, ...update.edit];
+    await runWithConcurrency(productUpdateList, BULK_PRODUCT_UPDATE_CONCURRENCY, async (update) => {
+      try {
+        const currentRaw = getArray(update.product.raw_image_url);
+        const currentEdit = getArray(update.product.edited_image_url);
 
-      const updatePayload = {
-        raw_image_url: nextRaw,
-        edited_image_url: nextEdit,
-        updated_at: new Date().toISOString()
-      };
+        const nextRaw = Array.from(new Set([...currentRaw, ...update.raw]));
+        const nextEdit = Array.from(new Set([...currentEdit, ...update.edit]));
 
-      // Important:
-      // Bulk uploads are usually done by Photographer/Admin.
-      // They must NOT claim the product and must NOT change Ready to work → In Progress.
-      // Only an employee/operator changing the status manually should start tracking.
-      const { error: updateError } = await supabase
-        .from('products')
-        .update(updatePayload)
-        .eq('id', update.product.id);
+        const updatePayload = {
+          raw_image_url: nextRaw,
+          edited_image_url: nextEdit,
+          updated_at: new Date().toISOString()
+        };
 
-      if (updateError) {
-        console.error(`Failed to update product ${update.product.sku}`, updateError);
-        continue;
+        // Important:
+        // Bulk uploads are usually done by Photographer/Admin.
+        // They must NOT claim the product and must NOT change Ready to work → In Progress.
+        // Only an employee/operator changing the status manually should start tracking.
+        const { error: updateError } = await supabase
+          .from('products')
+          .update(updatePayload)
+          .eq('id', update.product.id);
+
+        if (updateError) throw updateError;
+
+        successCount += 1;
+        return { ok: true };
+      } catch (err) {
+        const message = err?.message || 'Unknown database update error';
+        skippedFiles.push(`${update.product.sku || update.product.id} → database update failed: ${message}`);
+        console.error(`Failed to update product ${update.product.sku}`, err);
+        return { ok: false, error: message };
+      } finally {
+        processedProductUpdateCount += 1;
+        pushBulkProgress({
+          phase: `Updating product records (${Math.min(BULK_PRODUCT_UPDATE_CONCURRENCY, productUpdateList.length)} at a time)`,
+          total: productUpdateList.length,
+          processed: processedProductUpdateCount,
+          uploaded: uploadedFileCount,
+          skipped: skippedFiles.length,
+          productCount: successCount
+        }, processedProductUpdateCount === productUpdateList.length || processedProductUpdateCount % 3 === 0);
       }
+    });
 
-      successCount++;
-    }
+    pushBulkProgress({
+      phase: 'Complete',
+      total: productUpdateList.length,
+      processed: productUpdateList.length,
+      uploaded: uploadedFileCount,
+      skipped: skippedFiles.length,
+      productCount: successCount
+    }, true);
 
     return {
       successCount,
@@ -2397,6 +2644,7 @@ export default function IntegratedOperationsPortal() {
       alert('ZIP upload failed: ' + (err.message || 'Unknown error'));
     } finally {
       setUploading(false);
+      setBulkUploadProgress(null);
       e.target.value = null;
     }
   };
@@ -2442,6 +2690,7 @@ export default function IntegratedOperationsPortal() {
       alert('Folder upload failed: ' + (err.message || 'Unknown error'));
     } finally {
       setUploading(false);
+      setBulkUploadProgress(null);
       e.target.value = null;
     }
   };
@@ -3280,6 +3529,9 @@ export default function IntegratedOperationsPortal() {
   const selectedAssetRawCount = selectedAssetDirectoryProducts.reduce((sum, prod) => sum + getArray(prod.raw_image_url).filter(Boolean).length, 0);
   const selectedAssetEditedCount = selectedAssetDirectoryProducts.reduce((sum, prod) => sum + getArray(prod.edited_image_url).filter(Boolean).length, 0);
   const allVisibleAssetProductsSelected = assetDirectoryProducts.length > 0 && assetDirectoryProductIds.every(id => selectedAssetProductIds.includes(id));
+  const bulkUploadProgressPercent = bulkUploadProgress?.total
+    ? Math.min(100, Math.round(((bulkUploadProgress.processed || 0) / bulkUploadProgress.total) * 100))
+    : 0;
 
   const toggleAssetProductSelection = (productId) => {
     setSelectedAssetProductIds(prev =>
@@ -3521,6 +3773,17 @@ export default function IntegratedOperationsPortal() {
       permissions: createPortalPermissionSet(checked)
     }));
   };
+
+  const permissionRoles = [
+    { roleName: 'Admin', label: '⚙️ Full Access' },
+    { roleName: 'Manager', label: '🧭 Review Access' },
+    { roleName: 'Operator', label: '👤 Workflow Staff' },
+    { roleName: 'Photographer', label: '📸 Media Staff' },
+    { roleName: 'Content Editor', label: '📝 Sheet Staff' },
+    ...customRoles
+      .filter(role => !['Photographer', 'Content Editor'].includes(role.roleName))
+      .map(role => ({ roleName: role.roleName, label: `🎨 ${role.roleName}`, customRole: role }))
+  ];
 
   const hasMatrixPermission = (roleName, featureKey) => roleAllowsPortalFeature(roleName, customRoles, featureKey);
 
@@ -4912,6 +5175,31 @@ export default function IntegratedOperationsPortal() {
                             <p className="text-[10px] text-gray-500 font-bold leading-relaxed">
                               For full inventory upload, select one parent folder that contains many <strong>SKU/RAW</strong> and <strong>SKU/EDITED</strong> folders, or select multiple ZIP files at once.
                             </p>
+
+                            {bulkUploadProgress && (
+                              <div className="p-3 bg-white/80 border border-[rgba(138,21,56,0.18)] rounded-xl shadow-xs">
+                                <div className="flex items-center justify-between gap-3 mb-2">
+                                  <span className="text-[10px] font-black uppercase tracking-wider text-[#8a1538]">
+                                    {bulkUploadProgress.phase || 'Uploading assets'}
+                                  </span>
+                                  <span className="text-[10px] font-black text-gray-500">
+                                    {bulkUploadProgressPercent}%
+                                  </span>
+                                </div>
+                                <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden border border-gray-100">
+                                  <div
+                                    className="h-full bg-[rgba(138,21,56,0.85)] transition-all duration-300"
+                                    style={{ width: `${bulkUploadProgressPercent}%` }}
+                                  ></div>
+                                </div>
+                                <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] font-bold text-gray-500">
+                                  <span>Processed: {bulkUploadProgress.processed || 0} / {bulkUploadProgress.total || 0}</span>
+                                  <span>Uploaded: {bulkUploadProgress.uploaded || 0}</span>
+                                  <span>Skipped: {bulkUploadProgress.skipped || 0}</span>
+                                  <span>Products updated: {bulkUploadProgress.productCount || 0}</span>
+                                </div>
+                              </div>
+                            )}
 
                             {/* RESTORED BULK ASSETS EXPORT BUTTON */}
                             {(authRole === 'Admin' || authRole === 'Manager') && (
